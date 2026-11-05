@@ -45,7 +45,12 @@ func main() {
 	var cfClient cf.TunnelService
 	if accountID != "" && apiToken != "" {
 		setupLog.Info("Using Real Cloudflare Client")
-		cfClient = cf.NewRealCloudflareClient(accountID, apiToken)
+		realClient, err := cf.NewRealCloudflareClient(accountID, apiToken)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize Cloudflare client")
+			os.Exit(1)
+		}
+		cfClient = realClient
 	} else {
 		setupLog.Info("CLOUDFLARE_API_TOKEN/ACCOUNT_ID not provided; using Mock Cloudflare Client")
 		cfClient = cf.NewMockCloudflareClient()

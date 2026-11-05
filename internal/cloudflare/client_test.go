@@ -12,19 +12,16 @@ func TestMockCloudflareClient(t *testing.T) {
 	mock := NewMockCloudflareClient()
 	ctx := context.Background()
 
-	// Test Tunnel Creation
 	info, err := mock.CreateTunnel(ctx, "agent-job-123")
 	assert.NoError(t, err)
 	assert.NotNil(t, info)
 	assert.Equal(t, "agent-job-123", info.Name)
 	assert.Contains(t, info.ID, "mock-id-agent-job-123")
 
-	// Test DNS Creation
 	err = mock.CreateDNSRecord(ctx, "zone-123", "agent-job-123.example.com", info.ID)
 	assert.NoError(t, err)
 	assert.Equal(t, info.ID, mock.CreatedDNSRecords["agent-job-123.example.com"])
 
-	// Test Deletion
 	err = mock.DeleteDNSRecord(ctx, "zone-123", "agent-job-123.example.com")
 	assert.NoError(t, err)
 	assert.Empty(t, mock.CreatedDNSRecords["agent-job-123.example.com"])
@@ -39,7 +36,9 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 		t.Skip("Skipping live Cloudflare API test: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID not set")
 	}
 
-	client := NewRealCloudflareClient(accountID, apiToken)
+	client, err := NewRealCloudflareClient(accountID, apiToken)
+	assert.NoError(t, err)
+
 	ctx := context.Background()
 
 	info, err := client.CreateTunnel(ctx, "ci-test-agent-tunnel")

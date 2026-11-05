@@ -43,7 +43,7 @@ func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient,
 }
 
 func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
-	secret := "a-randomly-generated-32-byte-secret-key" // Replace with crypto/rand token generation
+	secret := "a-randomly-generated-32-byte-secret-key"
 
 	tunnel, err := c.api.CreateTunnel(ctx, cloudflare.AccountIdentifier(c.AccountID), cloudflare.TunnelCreateParams{
 		Name:   name,
@@ -84,7 +84,7 @@ func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, host
 }
 
 func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error {
-	app, err := c.api.CreateAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.AccessApplication{
+	app, err := c.api.CreateAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.CreateAccessApplicationParams{
 		Name:   name,
 		Domain: domain,
 	})
@@ -99,7 +99,7 @@ func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID
 		}{Email: email}})
 	}
 
-	_, err = c.api.CreateAccessPolicy(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.AccessPolicy{
+	_, err = c.api.CreateAccessPolicy(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.CreateAccessPolicyParams{
 		ApplicationID: app.ID,
 		Name:          fmt.Sprintf("%s-policy", name),
 		Decision:      "allow",
@@ -139,5 +139,62 @@ func (c *RealCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID
 			return c.api.DeleteAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), app.ID)
 		}
 	}
+	return nil
+}
+
+// MockCloudflareClient implementation
+type MockCloudflareClient struct {
+	CreatedTunnels    map[string]*TunnelInfo
+	CreatedDNSRecords map[string]string
+	CreatedPolicies   map[string][]string
+}
+
+func NewMockCloudflareClient() *MockCloudflareClient {
+	return &MockCloudflareClient{
+		CreatedTunnels:    make(map[string]*TunnelInfo),
+		CreatedDNSRecords: make(map[string]string),
+		CreatedPolicies:   make(map[string][]string),
+	}
+}
+
+func (m *MockCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
+	info := &TunnelInfo{
+		ID:       fmt.Sprintf("mock-id-%s", name),
+		Name:     name,
+		Secret:   "mock-secret-token",
+		Hostname: fmt.Sprintf("%s.cfargotunnel.com", name),
+		Token:    "mock-tunnel-token",
+	}
+	m.CreatedTunnels[name] = info
+	return info, nil
+}
+
+func (m *MockCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error {
+	m.CreatedDNSRecords[hostname] = tunnelID
+	return nil
+}
+
+func (m *MockCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error {
+	m.CreatedPolicies[domain] = allowedEmails
+	return nil
+}
+
+func (m *MockCloudflareClient) DeleteTunnel(ctx context.Context, tunnelID string) error {
+	for k, v := range m.CreatedTunnels {
+		if v.ID == tunnelID {
+			delete(m.CreatedTunnels, k)
+			break
+		}
+	}
+	return nil
+}
+
+func (m *MockCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, hostname string) error {
+	delete(m.CreatedDNSRecords, hostname)
+	return nil
+}
+
+func (m *MockCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID, domain string) error {
+	delete(m.CreatedPolicies, domain)
 	return nil
 }
