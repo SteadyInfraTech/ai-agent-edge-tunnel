@@ -30,6 +30,10 @@ spec:
     schema:
       openAPIV3Schema:
         type: object
+        # Without this a resource with no spec passes admission and reaches the
+        # controller with empty Cloudflare settings.
+        required:
+        - spec
         properties:
           spec:
             type: object
@@ -60,9 +64,10 @@ spec:
               ttl:
                 type: string
                 description: Go duration such as "2h". The clock starts when the tunnel becomes Active.
-                # Positive Go durations: leading fractions (.5h), a leading +, and
-                # both micro signs. Zero passes the pattern; the controller rejects it.
-                pattern: '^\+?(([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$'
+                # Empty (no expiry), or a positive Go duration: leading fractions (.5h),
+                # a leading +, and both micro signs. Zero passes the pattern; the
+                # controller rejects it.
+                pattern: '^$|^\+?(([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$'
               cleanupOnFinish:
                 type: boolean
                 description: Reserved; accepted but not acted on yet.

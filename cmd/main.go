@@ -27,6 +27,8 @@ func init() {
 	utilruntime.Must(agentopsv1alpha1.AddToScheme(scheme))
 }
 
+// main parses flags, builds the Cloudflare client (real, or the in-memory fake
+// with --dry-run) and runs the controller manager.
 func main() {
 	var (
 		dryRun     bool
@@ -85,6 +87,7 @@ func main() {
 		Scheme:           mgr.GetScheme(),
 		CloudflareClient: cfClient,
 		BaseDomain:       baseDomain,
+		DryRun:           dryRun,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentEdgeTunnel")
 		os.Exit(1)

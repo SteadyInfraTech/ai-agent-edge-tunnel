@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [ main ]
+  # Every pull request, not just those targeting main, so stacked PRs are tested.
   pull_request:
-    branches: [ main ]
 
 permissions:
   contents: read

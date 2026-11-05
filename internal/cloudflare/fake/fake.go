@@ -29,6 +29,7 @@ type Client struct {
 	DeleteDNSErr    error
 }
 
+// New returns an empty Client.
 func New() *Client {
 	return &Client{
 		Tunnels:    make(map[string]*cloudflare.TunnelInfo),
@@ -37,6 +38,8 @@ func New() *Client {
 	}
 }
 
+// CreateTunnel records a tunnel under an ID that starts with
+// cloudflare.DryRunIDPrefix, so it can never be mistaken for a real one.
 func (c *Client) CreateTunnel(_ context.Context, name string) (*cloudflare.TunnelInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -44,7 +47,7 @@ func (c *Client) CreateTunnel(_ context.Context, name string) (*cloudflare.Tunne
 	if c.CreateTunnelErr != nil {
 		return nil, c.CreateTunnelErr
 	}
-	id := fmt.Sprintf("fake-tunnel-%d", c.CreateTunnelCalls)
+	id := fmt.Sprintf("%stunnel-%d", cloudflare.DryRunIDPrefix, c.CreateTunnelCalls)
 	info := &cloudflare.TunnelInfo{
 		ID:       id,
 		Name:     name,
@@ -56,6 +59,7 @@ func (c *Client) CreateTunnel(_ context.Context, name string) (*cloudflare.Tunne
 	return info, nil
 }
 
+// CreateDNSRecord records hostname as pointing at tunnelID.
 func (c *Client) CreateDNSRecord(_ context.Context, _, hostname, tunnelID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -66,6 +70,7 @@ func (c *Client) CreateDNSRecord(_ context.Context, _, hostname, tunnelID string
 	return nil
 }
 
+// CreateAccessPolicy records the allowed emails for domain.
 func (c *Client) CreateAccessPolicy(_ context.Context, _, _, domain string, allowedEmails []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -73,6 +78,8 @@ func (c *Client) CreateAccessPolicy(_ context.Context, _, _, domain string, allo
 	return nil
 }
 
+// DeleteTunnel forgets the tunnel. Deleting an unknown ID succeeds, like the
+// real client, which treats an already-absent tunnel as deleted.
 func (c *Client) DeleteTunnel(_ context.Context, tunnelID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -83,6 +90,7 @@ func (c *Client) DeleteTunnel(_ context.Context, tunnelID string) error {
 	return nil
 }
 
+// DeleteDNSRecord forgets hostname, but only if it points at tunnelID.
 func (c *Client) DeleteDNSRecord(_ context.Context, _, hostname, tunnelID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -95,6 +103,7 @@ func (c *Client) DeleteDNSRecord(_ context.Context, _, hostname, tunnelID string
 	return nil
 }
 
+// DeleteAccessPolicy forgets the policy for domain.
 func (c *Client) DeleteAccessPolicy(_ context.Context, _, domain string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
