@@ -1,0 +1,18 @@
+apiVersion: agentops.io/v1alpha1
+kind: AgentEdgeTunnel
+metadata:
+  name: sample-agent-tunnel
+  namespace: default
+spec:
+  targetPodSelector:
+    app: langgraph-worker
+  cloudflare:
+    zoneID: "023e105f4ecef8ad9ca31a8372d0c353"
+    subdomain: "agent-job-8f92"
+  ttl: "2h"
+  cleanupOnFinish: true
+  security:
+    allowedEmails:
+      - "devops@company.com"
+    webhookValidation:
+      provider: "github"
