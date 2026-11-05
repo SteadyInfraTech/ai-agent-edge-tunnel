@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMockCloudflareClient(t *testing.T) {
@@ -13,8 +14,8 @@ func TestMockCloudflareClient(t *testing.T) {
 	ctx := context.Background()
 
 	info, err := mock.CreateTunnel(ctx, "agent-job-123")
-	assert.NoError(t, err)
-	assert.NotNil(t, info)
+	require.NoError(t, err)
+	require.NotNil(t, info)
 	assert.Equal(t, "agent-job-123", info.Name)
 	assert.Contains(t, info.ID, "mock-id-agent-job-123")
 
@@ -37,13 +38,13 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 	}
 
 	client, err := NewRealCloudflareClient(accountID, apiToken)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 
 	info, err := client.CreateTunnel(ctx, "ci-test-agent-tunnel")
-	assert.NoError(t, err)
-	assert.NotNil(t, info)
+	require.NoError(t, err)
+	require.NotNil(t, info)
 
 	if zoneID != "" {
 		err = client.CreateDNSRecord(ctx, zoneID, "ci-test.agents.yourdomain.com", info.ID)

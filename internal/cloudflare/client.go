@@ -2,6 +2,8 @@ package cloudflare
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 
 	"github.com/cloudflare/cloudflare-go"
@@ -43,7 +45,12 @@ func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient,
 }
 
 func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
-	secret := "a-randomly-generated-32-byte-secret-key"
+	// Generate a cryptographically secure 32-byte secret and base64-encode it
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate random secret: %w", err)
+	}
+	secret := base64.StdEncoding.EncodeToString(secretBytes)
 
 	tunnel, err := c.api.CreateTunnel(ctx, cloudflare.AccountIdentifier(c.AccountID), cloudflare.TunnelCreateParams{
 		Name:   name,
