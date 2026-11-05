@@ -14,6 +14,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCheckExistingRecord(t *testing.T) {
+	yes, no := true, false
+	rec := func(typ, content string, proxied *bool) cloudflare.DNSRecord {
+		return cloudflare.DNSRecord{Type: typ, Content: content, Proxied: proxied}
+	}
+	target := tunnelTarget("t1")
+
+	assert.NoError(t, checkExistingRecord(rec("CNAME", target, &yes), "h.example.com", "t1"))
+	assert.Error(t, checkExistingRecord(rec("CNAME", target, &no), "h.example.com", "t1"), "DNS-only record carries no traffic")
+	assert.Error(t, checkExistingRecord(rec("CNAME", target, nil), "h.example.com", "t1"), "unknown proxy state is not ready")
+	assert.Error(t, checkExistingRecord(rec("CNAME", tunnelTarget("other"), &yes), "h.example.com", "t1"), "other tunnel")
+	assert.Error(t, checkExistingRecord(rec("A", target, &yes), "h.example.com", "t1"), "wrong type")
+}
+
 func TestIsNotFound(t *testing.T) {
 	notFound := cloudflare.NewNotFoundError(&cloudflare.Error{StatusCode: 404, Type: cloudflare.ErrorTypeNotFound})
 	serverErr := cloudflare.NewServiceError(&cloudflare.Error{StatusCode: 500, Type: cloudflare.ErrorTypeService})

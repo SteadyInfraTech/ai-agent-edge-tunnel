@@ -60,7 +60,9 @@ spec:
               ttl:
                 type: string
                 description: Go duration such as "2h". The clock starts when the tunnel becomes Active.
-                pattern: '^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$'
+                # Positive Go durations: leading fractions (.5h), a leading +, and
+                # both micro signs. Zero passes the pattern; the controller rejects it.
+                pattern: '^\+?(([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$'
               cleanupOnFinish:
                 type: boolean
                 description: Reserved; accepted but not acted on yet.

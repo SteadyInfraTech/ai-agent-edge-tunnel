@@ -78,6 +78,19 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 	}, nil
 }
 
+// checkExistingRecord accepts a pre-existing record only if it is exactly what
+// CreateDNSRecord would have made: a proxied CNAME to the tunnel. A DNS-only
+// CNAME to the tunnel does not carry traffic, so it must not count as ready.
+func checkExistingRecord(rec cloudflare.DNSRecord, hostname, tunnelID string) error {
+	if rec.Type != "CNAME" || rec.Content != tunnelTarget(tunnelID) {
+		return fmt.Errorf("DNS record %q already exists (%s -> %s) and does not point at tunnel %s", hostname, rec.Type, rec.Content, tunnelID)
+	}
+	if rec.Proxied == nil || !*rec.Proxied {
+		return fmt.Errorf("DNS record %q points at tunnel %s but is not proxied, so traffic would not reach the tunnel; enable the proxy or delete the record", hostname, tunnelID)
+	}
+	return nil
+}
+
 // tunnelTarget is the CNAME target Cloudflare assigns to a tunnel.
 func tunnelTarget(tunnelID string) string {
 	return fmt.Sprintf("%s.cfargotunnel.com", tunnelID)
@@ -94,11 +107,7 @@ func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, host
 		return fmt.Errorf("failed to list DNS records for %q: %w", hostname, err)
 	}
 	if len(existing) > 0 {
-		rec := existing[0]
-		if rec.Type == "CNAME" && rec.Content == target {
-			return nil
-		}
-		return fmt.Errorf("DNS record %q already exists (%s -> %s) and does not point at tunnel %s", hostname, rec.Type, rec.Content, tunnelID)
+		return checkExistingRecord(existing[0], hostname, tunnelID)
 	}
 
 	_, err = c.api.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.CreateDNSRecordParams{
