@@ -26,6 +26,7 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// init registers the Kubernetes and operator API types with the scheme.
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentopsv1alpha1.AddToScheme(scheme))
@@ -121,7 +122,6 @@ func main() {
 	if err = (&controller.AgentEdgeTunnelReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
-		APIReader:        mgr.GetAPIReader(),
 		CloudflareClient: cfClient,
 		AccountID:        accountID,
 		BaseDomain:       baseDomain,

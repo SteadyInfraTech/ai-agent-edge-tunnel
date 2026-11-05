@@ -55,6 +55,8 @@ type RealCloudflareClient struct {
 	api       *cloudflare.API
 }
 
+// NewRealCloudflareClient returns a client that talks to the Cloudflare API
+// with the given account ID and API token.
 func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient, error) {
 	api, err := cloudflare.NewWithAPIToken(apiToken)
 	if err != nil {
@@ -67,6 +69,8 @@ func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient,
 	}, nil
 }
 
+// CreateTunnel creates a locally managed tunnel and returns its ID, credentials
+// and token. Cloudflare returns the secret only once.
 func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
 	// Generate a cryptographically secure 32-byte secret and base64-encode it
 	secretBytes := make([]byte, 32)
@@ -169,6 +173,8 @@ func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, host
 	return nil
 }
 
+// CreateAccessPolicy creates an Access application for domain with an allow
+// policy for allowedEmails, and returns the application ID.
 func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) (string, error) {
 	app, err := c.api.CreateAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.CreateAccessApplicationParams{
 		Name:   name,
@@ -203,6 +209,8 @@ func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID
 	return app.ID, nil
 }
 
+// DeleteAccessApplication deletes the Access application with the given ID. An
+// application that is already gone is not an error.
 func (c *RealCloudflareClient) DeleteAccessApplication(ctx context.Context, accountID, appID string) error {
 	err := c.api.DeleteAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), appID)
 	if err != nil {

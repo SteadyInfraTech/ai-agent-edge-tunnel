@@ -3,4 +3,4 @@ resources:
 images:
 - name: controller
   newName: ghcr.io/steadyinfratech/ai-agent-edge-tunnel
-  newTag: latest   # pin a released tag or digest
+  newTag: latest   # overridden by `make deploy IMG=...`

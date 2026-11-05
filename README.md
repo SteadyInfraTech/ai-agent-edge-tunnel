@@ -20,11 +20,11 @@ spec:
 For each object the operator creates, in this order:
 
 1. a Cloudflare **Tunnel** (its ID and credentials are stored immediately, so retries never leak tunnels);
-2. a Cloudflare **Access** application and allow policy, so the hostname is protected *before* it exists;
+2. for objects with `security.allowedEmails`, a Cloudflare **Access** application and allow policy, so the hostname is protected *before* it exists (objects with `security.allowPublic: true` deliberately get none);
 3. a proxied **DNS** CNAME, which is what makes `agent-job-8f92.<base-domain>` reachable;
 4. a **cloudflared** Deployment in the object's namespace, configured to send that hostname, and nothing else, to `service`.
 
-If the Access policy cannot be created, nothing after it runs: the hostname never goes live unprotected.
+If the Access policy of a protected object cannot be created, nothing after it runs: the hostname never goes live unprotected.
 When the `ttl` expires, or the object is deleted, everything is removed in reverse order
 (connector first, because Cloudflare will not delete a tunnel that is still connected).
 `Terminated` is final; an expired object is never re-provisioned.
@@ -35,7 +35,7 @@ NAME                  PHASE    HOSTNAME                         CONNECTED   EXPI
 sample-agent-tunnel   Active   agent-job-8f92.agents.acme.dev   true        2026-11-05T14:00:00Z
 ```
 
-`Active` means the tunnel, Access policy and DNS record exist; `CONNECTED` is whether the cloudflared pod
+`Active` means the tunnel and DNS record exist, plus the Access policy for email-protected objects; `CONNECTED` is whether the cloudflared pod
 has connected to Cloudflare's edge.
 
 ## Security model
@@ -51,6 +51,10 @@ has connected to Cloudflare's edge.
   seccomp, no service account token.
 - **Least-privilege operator.** It can `get/create/update/delete` Secrets but not `list` or `watch` them, so it
   cannot enumerate Secrets in the cluster. Its cache is disabled for Secrets to make that work.
+  **Limit:** the ClusterRole is cluster-wide, so a compromised operator pod could still `get` a Secret in any
+  namespace if it knew the name. Kubernetes cannot scope a ClusterRole to a namespace; to narrow it, replace the
+  Secret and Deployment rules with a `Role` and `RoleBinding` in each namespace you use tunnels in. That needs a
+  namespace-restricted cache, which is not implemented yet.
 - **No adoption.** The operator refuses to overwrite a Secret, Deployment or DNS record it does not own.
 - **Immutable once created:** `spec.service`, `spec.security` and `spec.cloudflare` cannot change after the
   tunnel exists; delete and recreate instead.
@@ -118,9 +122,13 @@ kubectl -n edge-tunnel-system create secret generic edge-tunnel-cloudflare \
   --from-literal=account-id=... --from-literal=api-token=...
 # Set EDGE_BASE_DOMAIN and CONNECTOR_IMAGE in config/manager/manager.yaml, then:
 make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
-make deploy
+make deploy IMG=<your-registry>/ai-agent-edge-tunnel:<tag>        # needs the kustomize CLI
 kubectl apply -f config/samples/agentops_v1alpha1_agentedgetunnel.yaml
 ```
+
+`make deploy` sets the manager image to `IMG` on a temporary copy of `config/`. To remove everything, use
+`make undeploy`: it deletes all `AgentEdgeTunnel` objects and waits for their Cloudflare cleanup before it
+removes the manager and the CRD, so nothing is left running in Cloudflare.
 
 ### Local Development & Testing
 

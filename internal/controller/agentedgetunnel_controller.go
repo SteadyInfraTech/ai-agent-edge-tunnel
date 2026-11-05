@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -62,10 +63,6 @@ type AgentEdgeTunnelReconciler struct {
 	// DryRun is true when CloudflareClient is the in-memory fake. It keeps
 	// dry-run and real state apart: see reconcileMode.
 	DryRun bool
-	// APIReader reads straight from the API server, bypassing the cache. It is
-	// used to learn whether a status write that returned an error was stored
-	// anyway. Optional: it falls back to the (possibly cached) Client.
-	APIReader client.Reader
 	// Now is overridable for tests.
 	Now func() time.Time
 }
@@ -192,6 +189,8 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 	return ctrl.Result{}, r.Update(ctx, t)
 }
 
+// reconcileActive handles an Active object: it cleans up once the TTL has
+// passed and otherwise requeues for the expiry.
 func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (ctrl.Result, error) {
 	now := r.now()
 	if t.Status.ExpiresAt != nil && !now.Before(t.Status.ExpiresAt.Time) {
@@ -262,6 +261,11 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	}
 
 	if t.Status.TunnelID == "" {
+		// A Secret we cannot use would fail every attempt after the tunnel was
+		// already created, so check before making any Cloudflare call.
+		if err := r.checkConnectorSecretFree(ctx, t); err != nil {
+			return r.fail(ctx, t, err)
+		}
 		logger.Info("Creating Cloudflare tunnel", "name", t.Name)
 		info, err := r.CloudflareClient.CreateTunnel(ctx, tunnelName(t))
 		if err != nil {
@@ -279,7 +283,16 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		t.Status.Phase = agentopsv1alpha1.PhasePending
 		t.Status.Message = "tunnel created; configuring access and DNS"
 		if err := r.Status().Update(ctx, t); err != nil {
-			r.discardUnlessStored(ctx, t, info.ID)
+			// An error does not prove the write was rejected: a timeout can
+			// still have stored the ID. Deleting the tunnel then would leave
+			// status pointing at a tunnel that no longer exists, and every
+			// retry would reuse that dead ID. A single re-read cannot settle
+			// it either, because the write may still commit afterwards. So
+			// the tunnel is kept. If the write really was lost, the leak is
+			// logged with the tunnel's ID and name, and the retry fails
+			// loudly if Cloudflare refuses the duplicate name, instead of
+			// silently running against a deleted tunnel.
+			logger.Error(err, "Status write failed after the tunnel was created; keeping the tunnel because the write may still commit. If it was lost, delete the tunnel by hand", "tunnelID", info.ID, "tunnelName", tunnelName(t))
 			return ctrl.Result{}, err
 		}
 	}
@@ -312,20 +325,6 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	return ctrl.Result{RequeueAfter: maxRequeue}, nil
 }
 
-// statusHoldsTunnel re-reads the object from the API server and reports whether
-// its stored status records tunnelID.
-func (r *AgentEdgeTunnelReconciler) statusHoldsTunnel(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, tunnelID string) (bool, error) {
-	var reader client.Reader = r.Client
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
-	var cur agentopsv1alpha1.AgentEdgeTunnel
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(t), &cur); err != nil {
-		return false, err
-	}
-	return cur.Status.TunnelID == tunnelID, nil
-}
-
 // fail records a transient error in status and returns it so the controller
 // retries with backoff. IDs already recorded stay recorded.
 func (r *AgentEdgeTunnelReconciler) fail(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, cause error) (ctrl.Result, error) {
@@ -337,24 +336,21 @@ func (r *AgentEdgeTunnelReconciler) fail(ctx context.Context, t *agentopsv1alpha
 	return ctrl.Result{}, cause
 }
 
-// discardUnlessStored runs after a status write that recorded tunnelID
-// returned an error. The error does not prove the write was rejected: a timeout
-// can still have stored the ID, and deleting the tunnel then would leave status
-// pointing at a tunnel that no longer exists, which every retry would reuse. So
-// the tunnel is deleted only when the API server confirms the ID was not
-// stored. If that cannot be confirmed it is kept: a leak is logged with the
-// tunnel's ID and name and can be removed, a silently dead ID cannot.
-func (r *AgentEdgeTunnelReconciler) discardUnlessStored(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, tunnelID string) {
-	logger := log.FromContext(ctx)
-	stored, err := r.statusHoldsTunnel(ctx, t, tunnelID)
-	switch {
-	case err != nil:
-		logger.Error(err, "Status write failed and the stored state is unknown; keeping the tunnel, it may be orphaned if the write was lost", "tunnelID", tunnelID, "tunnelName", tunnelName(t))
-	case stored:
-		logger.Info("Status write reported an error but the tunnel ID was stored; keeping the tunnel", "tunnelID", tunnelID)
-	default:
-		r.discardTunnel(ctx, tunnelID)
+// checkConnectorSecretFree fails fast when the connector Secret name is taken
+// by an object this tunnel does not own. writeConnectorSecret checks again,
+// which covers a Secret created in between.
+func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	if t.Spec.Service == nil {
+		return nil
 	}
+	var s corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &s); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(&s, t) {
+		return fmt.Errorf("secret %q already exists and is not managed by this AgentEdgeTunnel; refusing to overwrite it", s.Name)
+	}
+	return nil
 }
 
 // discardTunnel removes a tunnel whose ID could not be recorded.
@@ -415,10 +411,12 @@ func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1al
 
 // --- connector workload -----------------------------------------------------
 
+// connectorName is the name shared by the connector Deployment and its Secret.
 func connectorName(t *agentopsv1alpha1.AgentEdgeTunnel) string {
 	return t.Name + "-cloudflared"
 }
 
+// connectorLabels are the labels on, and the selector of, the connector pods.
 func connectorLabels(t *agentopsv1alpha1.AgentEdgeTunnel) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":     "cloudflared",
@@ -428,8 +426,8 @@ func connectorLabels(t *agentopsv1alpha1.AgentEdgeTunnel) map[string]string {
 }
 
 // connectorConfig renders cloudflared's config.yaml. Everything interpolated
-// is validated: the service name and port by the CRD, the hostname by the CRD
-// pattern plus the operator's base domain.
+// is validated: the service name and port by the CRD and by validate, the
+// hostname by the CRD pattern plus the operator's base domain.
 func connectorConfig(tunnelID, hostname string, svc *agentopsv1alpha1.ServiceTarget, namespace string) string {
 	return fmt.Sprintf(`tunnel: %s
 credentials-file: %s/%s
@@ -604,6 +602,7 @@ func (r *AgentEdgeTunnelReconciler) deleteConnector(ctx context.Context, t *agen
 	return nil
 }
 
+// statusMessage explains why an Active tunnel is not yet fully usable.
 func statusMessage(t *agentopsv1alpha1.AgentEdgeTunnel, connectorReady bool) string {
 	switch {
 	case t.Spec.Service == nil:
@@ -628,6 +627,16 @@ func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
+	// connectorConfig interpolates these into YAML, so they are checked here
+	// even though the CRD checks them too.
+	if svc := t.Spec.Service; svc != nil {
+		if errs := validation.IsDNS1035Label(svc.Name); len(errs) > 0 {
+			return 0, fmt.Errorf("spec.service.name is invalid: %s", strings.Join(errs, "; "))
+		}
+		if svc.Port < 1 || svc.Port > 65535 {
+			return 0, errors.New("spec.service.port must be between 1 and 65535")
+		}
+	}
 	sec := t.Spec.Security
 	// The CRD rejects these too; checking here covers an out-of-date CRD.
 	if sec.WebhookValidation != nil || sec.ServiceTokens {
@@ -643,6 +652,7 @@ func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
 	return ttl, nil
 }
 
+// hostname returns the public hostname for t under the configured base domain.
 func (r *AgentEdgeTunnelReconciler) hostname(t *agentopsv1alpha1.AgentEdgeTunnel) string {
 	return fmt.Sprintf("%s.%s", t.Spec.Cloudflare.Subdomain, strings.TrimPrefix(r.BaseDomain, "."))
 }
@@ -672,8 +682,13 @@ func parseTTL(s string) (time.Duration, error) {
 	return d, nil
 }
 
-func boolPtr(b bool) *bool    { return &b }
+// boolPtr returns a pointer to b.
+func boolPtr(b bool) *bool { return &b }
+
+// int32Ptr returns a pointer to i.
 func int32Ptr(i int32) *int32 { return &i }
+
+// int64Ptr returns a pointer to i.
 func int64Ptr(i int64) *int64 { return &i }
 
 // SetupWithManager registers the reconciler with mgr.
