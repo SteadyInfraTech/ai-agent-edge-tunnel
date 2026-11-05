@@ -12,7 +12,7 @@ type CloudflareConfig struct {
 
 // WebhookValidation holds HMAC edge validation details
 type WebhookValidation struct {
-	Provider string `json:"provider,omitempty"` // e.g. "github", "stripe"
+	Provider  string `json:"provider,omitempty"` // e.g. "github", "stripe"
 	SecretRef string `json:"secretRef,omitempty"`
 }
 
@@ -27,21 +27,46 @@ type SecurityConfig struct {
 type AgentEdgeTunnelSpec struct {
 	TargetPodSelector map[string]string `json:"targetPodSelector"`
 	Cloudflare        CloudflareConfig  `json:"cloudflare"`
-	TTL               string            `json:"ttl,omitempty"` // e.g., "2h"
-	CleanupOnFinish   bool              `json:"cleanupOnFinish"`
-	Security          SecurityConfig    `json:"security,omitempty"`
+	// TTL is a Go duration such as "2h". The clock starts when the tunnel
+	// becomes Active. Empty means no expiry.
+	TTL string `json:"ttl,omitempty"`
+	// CleanupOnFinish is reserved: it is accepted but not acted on yet.
+	CleanupOnFinish bool           `json:"cleanupOnFinish"`
+	Security        SecurityConfig `json:"security,omitempty"`
 }
+
+// Lifecycle phases of an AgentEdgeTunnel.
+const (
+	// PhasePending: Cloudflare resources are being created.
+	PhasePending = "Pending"
+	// PhaseActive: the tunnel and DNS record exist.
+	PhaseActive = "Active"
+	// PhaseTerminated: the TTL expired and the Cloudflare resources were removed.
+	// This is final; the object is not re-provisioned.
+	PhaseTerminated = "Terminated"
+	// PhaseFailed: the last provisioning attempt failed; it is retried with backoff.
+	PhaseFailed = "Failed"
+)
 
 // AgentEdgeTunnelStatus defines the observed state of AgentEdgeTunnel
 type AgentEdgeTunnelStatus struct {
-	TunnelID  string      `json:"tunnelID,omitempty"`
-	Hostname  string      `json:"hostname,omitempty"`
-	Phase     string      `json:"phase,omitempty"` // Pending, Active, Terminated, Failed
+	// TunnelID is recorded as soon as the tunnel exists, before DNS is
+	// configured, so a failed reconcile can be retried and cleaned up without
+	// creating a second tunnel.
+	TunnelID string `json:"tunnelID,omitempty"`
+	Hostname string `json:"hostname,omitempty"`
+	// Phase is one of Pending, Active, Terminated, Failed.
+	Phase string `json:"phase,omitempty"`
+	// Message describes the last error or transition.
+	Message   string       `json:"message,omitempty"`
 	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Hostname",type=string,JSONPath=`.status.hostname`
+// +kubebuilder:printcolumn:name="Expires",type=date,JSONPath=`.status.expiresAt`
 
 // AgentEdgeTunnel is the Schema for the agentedgetunnels API
 type AgentEdgeTunnel struct {

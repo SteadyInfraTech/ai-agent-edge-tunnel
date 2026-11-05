@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 
 	"github.com/cloudflare/cloudflare-go"
@@ -22,7 +23,9 @@ type TunnelService interface {
 	CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error
 	CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error
 	DeleteTunnel(ctx context.Context, tunnelID string) error
-	DeleteDNSRecord(ctx context.Context, zoneID, hostname string) error
+	// DeleteDNSRecord removes only CNAME records for hostname that point at
+	// tunnelID, so it can never delete a record this operator did not create.
+	DeleteDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error
 	DeleteAccessPolicy(ctx context.Context, accountID, domain string) error
 }
 
@@ -69,15 +72,35 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 		ID:       tunnel.ID,
 		Name:     tunnel.Name,
 		Secret:   secret,
-		Hostname: fmt.Sprintf("%s.cfargotunnel.com", tunnel.ID),
+		Hostname: tunnelTarget(tunnel.ID),
 		Token:    token,
 	}, nil
 }
 
-func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error {
-	target := fmt.Sprintf("%s.cfargotunnel.com", tunnelID)
+// tunnelTarget is the CNAME target Cloudflare assigns to a tunnel.
+func tunnelTarget(tunnelID string) string {
+	return fmt.Sprintf("%s.cfargotunnel.com", tunnelID)
+}
 
-	_, err := c.api.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.CreateDNSRecordParams{
+// CreateDNSRecord is idempotent: if the CNAME already points at the tunnel it
+// succeeds without changes, and if the name is taken by anything else it fails
+// instead of overwriting a record the operator does not own.
+func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error {
+	target := tunnelTarget(tunnelID)
+
+	existing, _, err := c.api.ListDNSRecords(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{Name: hostname})
+	if err != nil {
+		return fmt.Errorf("failed to list DNS records for %q: %w", hostname, err)
+	}
+	if len(existing) > 0 {
+		rec := existing[0]
+		if rec.Type == "CNAME" && rec.Content == target {
+			return nil
+		}
+		return fmt.Errorf("DNS record %q already exists (%s -> %s) and does not point at tunnel %s", hostname, rec.Type, rec.Content, tunnelID)
+	}
+
+	_, err = c.api.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.CreateDNSRecordParams{
 		Type:    "CNAME",
 		Name:    hostname,
 		Content: target,
@@ -127,12 +150,26 @@ func (c *RealCloudflareClient) DeleteTunnel(ctx context.Context, tunnelID string
 	return nil
 }
 
-func (c *RealCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, hostname string) error {
+// DeleteDNSRecord deletes the CNAME records for hostname that point at
+// tunnelID. Errors are returned, never swallowed: callers rely on them to retry.
+func (c *RealCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error {
+	target := tunnelTarget(tunnelID)
+
 	records, _, err := c.api.ListDNSRecords(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{Name: hostname})
-	if err != nil || len(records) == 0 {
-		return nil
+	if err != nil {
+		return fmt.Errorf("failed to list DNS records for %q: %w", hostname, err)
 	}
-	return c.api.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), records[0].ID)
+
+	var errs []error
+	for _, rec := range records {
+		if rec.Type != "CNAME" || rec.Content != target {
+			continue
+		}
+		if err := c.api.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), rec.ID); err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete DNS record %s: %w", rec.ID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (c *RealCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID, domain string) error {
@@ -146,62 +183,5 @@ func (c *RealCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID
 			return c.api.DeleteAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), app.ID)
 		}
 	}
-	return nil
-}
-
-// MockCloudflareClient implementation
-type MockCloudflareClient struct {
-	CreatedTunnels    map[string]*TunnelInfo
-	CreatedDNSRecords map[string]string
-	CreatedPolicies   map[string][]string
-}
-
-func NewMockCloudflareClient() *MockCloudflareClient {
-	return &MockCloudflareClient{
-		CreatedTunnels:    make(map[string]*TunnelInfo),
-		CreatedDNSRecords: make(map[string]string),
-		CreatedPolicies:   make(map[string][]string),
-	}
-}
-
-func (m *MockCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
-	info := &TunnelInfo{
-		ID:       fmt.Sprintf("mock-id-%s", name),
-		Name:     name,
-		Secret:   "mock-secret-token",
-		Hostname: fmt.Sprintf("%s.cfargotunnel.com", name),
-		Token:    "mock-tunnel-token",
-	}
-	m.CreatedTunnels[name] = info
-	return info, nil
-}
-
-func (m *MockCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error {
-	m.CreatedDNSRecords[hostname] = tunnelID
-	return nil
-}
-
-func (m *MockCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error {
-	m.CreatedPolicies[domain] = allowedEmails
-	return nil
-}
-
-func (m *MockCloudflareClient) DeleteTunnel(ctx context.Context, tunnelID string) error {
-	for k, v := range m.CreatedTunnels {
-		if v.ID == tunnelID {
-			delete(m.CreatedTunnels, k)
-			break
-		}
-	}
-	return nil
-}
-
-func (m *MockCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, hostname string) error {
-	delete(m.CreatedDNSRecords, hostname)
-	return nil
-}
-
-func (m *MockCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID, domain string) error {
-	delete(m.CreatedPolicies, domain)
 	return nil
 }

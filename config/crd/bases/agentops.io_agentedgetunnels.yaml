@@ -14,12 +14,28 @@ spec:
   - name: v1alpha1
     served: true
     storage: true
+    # Without the status subresource, the operator's status updates fail.
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Phase
+      type: string
+      jsonPath: .status.phase
+    - name: Hostname
+      type: string
+      jsonPath: .status.hostname
+    - name: Expires
+      type: date
+      jsonPath: .status.expiresAt
     schema:
       openAPIV3Schema:
         type: object
         properties:
           spec:
             type: object
+            required:
+            - targetPodSelector
+            - cloudflare
             properties:
               targetPodSelector:
                 type: object
@@ -27,18 +43,43 @@ spec:
                   type: string
               cloudflare:
                 type: object
-                properties:
-                  zoneID:
-                    type: string
-                  subdomain:
-                    type: string
                 required:
                 - zoneID
                 - subdomain
+                properties:
+                  zoneID:
+                    type: string
+                    minLength: 1
+                  subdomain:
+                    type: string
+                    # A single DNS label.
+                    pattern: '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+                x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: cloudflare settings are immutable once set
               ttl:
                 type: string
+                description: Go duration such as "2h". The clock starts when the tunnel becomes Active.
+                pattern: '^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$'
               cleanupOnFinish:
                 type: boolean
+                description: Reserved; accepted but not acted on yet.
+              security:
+                type: object
+                properties:
+                  allowedEmails:
+                    type: array
+                    items:
+                      type: string
+                  serviceTokens:
+                    type: boolean
+                  webhookValidation:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                      secretRef:
+                        type: string
           status:
             type: object
             properties:
@@ -48,3 +89,9 @@ spec:
                 type: string
               phase:
                 type: string
+                enum: [Pending, Active, Terminated, Failed]
+              message:
+                type: string
+              expiresAt:
+                type: string
+                format: date-time

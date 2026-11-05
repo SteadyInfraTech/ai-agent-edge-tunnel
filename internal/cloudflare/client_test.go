@@ -9,29 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMockCloudflareClient(t *testing.T) {
-	mock := NewMockCloudflareClient()
-	ctx := context.Background()
-
-	info, err := mock.CreateTunnel(ctx, "agent-job-123")
-	require.NoError(t, err)
-	require.NotNil(t, info)
-	assert.Equal(t, "agent-job-123", info.Name)
-	assert.Contains(t, info.ID, "mock-id-agent-job-123")
-
-	err = mock.CreateDNSRecord(ctx, "zone-123", "agent-job-123.example.com", info.ID)
-	assert.NoError(t, err)
-	assert.Equal(t, info.ID, mock.CreatedDNSRecords["agent-job-123.example.com"])
-
-	err = mock.DeleteDNSRecord(ctx, "zone-123", "agent-job-123.example.com")
-	assert.NoError(t, err)
-	assert.Empty(t, mock.CreatedDNSRecords["agent-job-123.example.com"])
-}
-
 func TestLiveCloudflareTunnel(t *testing.T) {
 	apiToken := os.Getenv("CLOUDFLARE_API_TOKEN")
 	accountID := os.Getenv("CLOUDFLARE_ACCOUNT_ID")
 	zoneID := os.Getenv("CLOUDFLARE_ZONE_ID")
+	// Full hostname inside the zone, e.g. ci-test.agents.example.com. The DNS
+	// part of the test is skipped unless both zone and hostname are set.
+	hostname := os.Getenv("CLOUDFLARE_TEST_HOSTNAME")
 
 	if apiToken == "" || accountID == "" {
 		t.Skip("Skipping live Cloudflare API test: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID not set")
@@ -45,15 +29,15 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 	info, err := client.CreateTunnel(ctx, "ci-test-agent-tunnel")
 	require.NoError(t, err)
 	require.NotNil(t, info)
+	// Always remove the tunnel, even if a later assertion fails.
+	t.Cleanup(func() {
+		assert.NoError(t, client.DeleteTunnel(context.Background(), info.ID))
+	})
 
-	if zoneID != "" {
-		err = client.CreateDNSRecord(ctx, zoneID, "ci-test.agents.yourdomain.com", info.ID)
-		assert.NoError(t, err)
-
-		err = client.DeleteDNSRecord(ctx, zoneID, "ci-test.agents.yourdomain.com")
-		assert.NoError(t, err)
+	if zoneID != "" && hostname != "" {
+		require.NoError(t, client.CreateDNSRecord(ctx, zoneID, hostname, info.ID))
+		// Creating again must be a no-op, not an error.
+		require.NoError(t, client.CreateDNSRecord(ctx, zoneID, hostname, info.ID))
+		assert.NoError(t, client.DeleteDNSRecord(ctx, zoneID, hostname, info.ID))
 	}
-
-	err = client.DeleteTunnel(ctx, info.ID)
-	assert.NoError(t, err)
 }

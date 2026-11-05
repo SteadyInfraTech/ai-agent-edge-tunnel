@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -11,6 +13,7 @@ import (
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
 	cf "github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
+	"github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare/fake"
 	"github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/controller"
 )
 
@@ -25,11 +28,49 @@ func init() {
 }
 
 func main() {
-	opts := zap.Options{
-		Development: true,
-	}
-	opts.BindFlags(nil)
+	var (
+		dryRun     bool
+		baseDomain string
+	)
+	flag.BoolVar(&dryRun, "dry-run", false,
+		"Use an in-memory fake instead of the Cloudflare API. Nothing is provisioned; for local development only.")
+	flag.StringVar(&baseDomain, "base-domain", os.Getenv("EDGE_BASE_DOMAIN"),
+		"Domain under which agent hostnames are created, e.g. agents.example.com. Env: EDGE_BASE_DOMAIN.")
+
+	opts := zap.Options{}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Validate configuration before touching the cluster. A missing credential
+	// must be a startup failure: silently falling back to a fake would report
+	// tunnels as Active that do not exist.
+	var cfClient cf.TunnelService
+	if dryRun {
+		setupLog.Info("DRY RUN: using an in-memory Cloudflare fake; no real resources will be created")
+		cfClient = fake.New()
+		if baseDomain == "" {
+			baseDomain = "agents.example.invalid"
+		}
+	} else {
+		accountID := os.Getenv("CLOUDFLARE_ACCOUNT_ID")
+		apiToken := os.Getenv("CLOUDFLARE_API_TOKEN")
+		if accountID == "" || apiToken == "" {
+			setupLog.Error(errors.New("missing credentials"),
+				"CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required (use --dry-run for local development)")
+			os.Exit(1)
+		}
+		if baseDomain == "" {
+			setupLog.Error(errors.New("missing base domain"), "--base-domain or EDGE_BASE_DOMAIN is required")
+			os.Exit(1)
+		}
+		realClient, err := cf.NewRealCloudflareClient(accountID, apiToken)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize Cloudflare client")
+			os.Exit(1)
+		}
+		cfClient = realClient
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
@@ -39,33 +80,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	accountID := os.Getenv("CLOUDFLARE_ACCOUNT_ID")
-	apiToken := os.Getenv("CLOUDFLARE_API_TOKEN")
-
-	var cfClient cf.TunnelService
-	if accountID != "" && apiToken != "" {
-		setupLog.Info("Using Real Cloudflare Client")
-		realClient, err := cf.NewRealCloudflareClient(accountID, apiToken)
-		if err != nil {
-			setupLog.Error(err, "unable to initialize Cloudflare client")
-			os.Exit(1)
-		}
-		cfClient = realClient
-	} else {
-		setupLog.Info("CLOUDFLARE_API_TOKEN/ACCOUNT_ID not provided; using Mock Cloudflare Client")
-		cfClient = cf.NewMockCloudflareClient()
-	}
-
 	if err = (&controller.AgentEdgeTunnelReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		CloudflareClient: cfClient,
+		BaseDomain:       baseDomain,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentEdgeTunnel")
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting manager for ai-agent-edge-tunnel")
+	setupLog.Info("Starting manager for ai-agent-edge-tunnel", "baseDomain", baseDomain)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
