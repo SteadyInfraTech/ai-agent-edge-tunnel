@@ -3,7 +3,6 @@ package cloudflare
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/cloudflare/cloudflare-go"
 )
@@ -44,12 +43,11 @@ func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient,
 }
 
 func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
-	secret := "a-randomly-generated-32-byte-secret-key" // In prod, generate via crypto/rand
-	
+	secret := "a-randomly-generated-32-byte-secret-key" // Replace with crypto/rand token generation
+
 	tunnel, err := c.api.CreateTunnel(ctx, cloudflare.AccountIdentifier(c.AccountID), cloudflare.TunnelCreateParams{
-		Name:      name,
-		Secret:    secret,
-		ConfigType: "cfd_tunnel",
+		Name:   name,
+		Secret: secret,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare API tunnel creation failed: %w", err)
@@ -71,13 +69,13 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 
 func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error {
 	target := fmt.Sprintf("%s.cfargotunnel.com", tunnelID)
-	
+
 	_, err := c.api.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.CreateDNSRecordParams{
 		Type:    "CNAME",
 		Name:    hostname,
 		Content: target,
 		Proxied: cloudflare.BoolPtr(true),
-		TTL:     1, // Automatic TTL
+		TTL:     1,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create Cloudflare DNS CNAME record: %w", err)
@@ -86,8 +84,7 @@ func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, host
 }
 
 func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error {
-	// Create Cloudflare Access Application
-	app, err := c.api.CreateAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.AccessApplicationParams{
+	app, err := c.api.CreateAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.AccessApplication{
 		Name:   name,
 		Domain: domain,
 	})
@@ -95,7 +92,6 @@ func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID
 		return fmt.Errorf("failed to create Access Application: %w", err)
 	}
 
-	// Create Access Policy requiring JWT / email match
 	var includeRules []interface{}
 	for _, email := range allowedEmails {
 		includeRules = append(includeRules, cloudflare.AccessGroupEmail{Email: struct {
@@ -103,7 +99,7 @@ func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID
 		}{Email: email}})
 	}
 
-	_, err = c.api.CreateAccessPolicy(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.AccessPolicyParams{
+	_, err = c.api.CreateAccessPolicy(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.AccessPolicy{
 		ApplicationID: app.ID,
 		Name:          fmt.Sprintf("%s-policy", name),
 		Decision:      "allow",
@@ -133,7 +129,7 @@ func (c *RealCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, host
 }
 
 func (c *RealCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID, domain string) error {
-	apps, _, err := c.api.ListAccessApplications(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.ListParameters{})
+	apps, _, err := c.api.ListAccessApplications(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.ListAccessApplicationsParams{})
 	if err != nil {
 		return err
 	}
