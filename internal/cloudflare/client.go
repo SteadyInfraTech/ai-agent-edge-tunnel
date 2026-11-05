@@ -12,22 +12,30 @@ import (
 )
 
 type TunnelInfo struct {
-	ID       string
-	Name     string
-	Secret   string
-	Hostname string
-	Token    string
+	// AccountID is the Cloudflare account that owns the tunnel.
+	AccountID string
+	ID        string
+	Name      string
+	Secret    string
+	Hostname  string
+	Token     string
 }
 
 type TunnelService interface {
 	CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error)
 	CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error
-	CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error
+	// CreateAccessPolicy creates an Access application for domain with an allow
+	// policy for the given emails and returns the application ID. If the policy
+	// cannot be attached, the application is removed again so nothing is left
+	// behind that the caller does not know about.
+	CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) (appID string, err error)
 	DeleteTunnel(ctx context.Context, tunnelID string) error
 	// DeleteDNSRecord removes only CNAME records for hostname that point at
 	// tunnelID, so it can never delete a record this operator did not create.
 	DeleteDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error
-	DeleteAccessPolicy(ctx context.Context, accountID, domain string) error
+	// DeleteAccessApplication deletes by ID, never by domain, so it cannot
+	// remove an application this operator did not create. Already gone is success.
+	DeleteAccessApplication(ctx context.Context, accountID, appID string) error
 }
 
 type RealCloudflareClient struct {
@@ -70,11 +78,12 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 	}
 
 	return &TunnelInfo{
-		ID:       tunnel.ID,
-		Name:     tunnel.Name,
-		Secret:   secret,
-		Hostname: tunnelTarget(tunnel.ID),
-		Token:    token,
+		AccountID: c.AccountID,
+		ID:        tunnel.ID,
+		Name:      tunnel.Name,
+		Secret:    secret,
+		Hostname:  tunnelTarget(tunnel.ID),
+		Token:     token,
 	}, nil
 }
 
@@ -123,13 +132,13 @@ func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, host
 	return nil
 }
 
-func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error {
+func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) (string, error) {
 	app, err := c.api.CreateAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.CreateAccessApplicationParams{
 		Name:   name,
 		Domain: domain,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create Access Application: %w", err)
+		return "", fmt.Errorf("failed to create Access Application: %w", err)
 	}
 
 	var includeRules []interface{}
@@ -146,9 +155,25 @@ func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID
 		Include:       includeRules,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to attach Access Policy: %w", err)
+		// An application without a policy would be left behind, unknown to the
+		// caller. Remove it, and report both failures if cleanup also fails.
+		if delErr := c.DeleteAccessApplication(ctx, accountID, app.ID); delErr != nil {
+			return "", errors.Join(fmt.Errorf("failed to attach Access Policy: %w", err), delErr)
+		}
+		return "", fmt.Errorf("failed to attach Access Policy: %w", err)
 	}
 
+	return app.ID, nil
+}
+
+func (c *RealCloudflareClient) DeleteAccessApplication(ctx context.Context, accountID, appID string) error {
+	err := c.api.DeleteAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), appID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete Access Application %s: %w", appID, err)
+	}
 	return nil
 }
 
@@ -198,18 +223,4 @@ func (c *RealCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, host
 		}
 	}
 	return errors.Join(errs...)
-}
-
-func (c *RealCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID, domain string) error {
-	apps, _, err := c.api.ListAccessApplications(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.ListAccessApplicationsParams{})
-	if err != nil {
-		return err
-	}
-
-	for _, app := range apps {
-		if app.Domain == domain {
-			return c.api.DeleteAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), app.ID)
-		}
-	}
-	return nil
 }

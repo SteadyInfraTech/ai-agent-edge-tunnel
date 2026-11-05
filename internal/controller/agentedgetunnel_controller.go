@@ -2,13 +2,18 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -25,6 +30,21 @@ const (
 
 	// maxRequeue bounds how long an Active tunnel waits between checks.
 	maxRequeue = 30 * time.Second
+
+	managedByLabel = "app.kubernetes.io/managed-by"
+	managedByValue = "ai-agent-edge-tunnel"
+
+	// Keys in the connector Secret, mounted at connectorConfigDir.
+	credentialsKey     = "credentials.json"
+	configKey          = "config.yaml"
+	connectorConfigDir = "/etc/cloudflared"
+
+	// cloudflared serves /ready (200 once connected to Cloudflare's edge) on
+	// its metrics address; the pod's readiness follows it.
+	connectorMetricsPort = 2000
+
+	// The official cloudflared image runs as this non-root user.
+	connectorUID int64 = 65532
 )
 
 // AgentEdgeTunnelReconciler reconciles an AgentEdgeTunnel object
@@ -32,9 +52,13 @@ type AgentEdgeTunnelReconciler struct {
 	client.Client
 	Scheme           *runtime.Scheme
 	CloudflareClient cf.TunnelService
+	// AccountID is the Cloudflare account used for Access applications.
+	AccountID string
 	// BaseDomain is the domain under which hostnames are created, e.g.
 	// "agents.example.com". Required.
 	BaseDomain string
+	// ConnectorImage is the cloudflared image. Pin a version or digest.
+	ConnectorImage string
 	// Now is overridable for tests.
 	Now func() time.Time
 }
@@ -45,6 +69,12 @@ func (r *AgentEdgeTunnelReconciler) now() time.Time {
 	}
 	return time.Now()
 }
+
+// +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;delete
 
 func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var tunnel agentopsv1alpha1.AgentEdgeTunnel
@@ -102,7 +132,28 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		t.Status.Phase = agentopsv1alpha1.PhaseTerminated
 		t.Status.Message = "TTL expired; Cloudflare resources removed"
 		t.Status.TunnelID = ""
+		t.Status.AccessAppID = ""
+		t.Status.ConnectorReady = false
 		return ctrl.Result{}, r.Status().Update(ctx, t)
+	}
+
+	// Keep the connector in its desired state and reflect whether it is
+	// connected. A failure is surfaced in status as well as retried.
+	ready, err := r.ensureConnector(ctx, t)
+	if err != nil {
+		t.Status.ConnectorReady = false
+		t.Status.Message = err.Error()
+		if uerr := r.Status().Update(ctx, t); uerr != nil {
+			log.FromContext(ctx).Error(uerr, "Failed to record connector error in status")
+		}
+		return ctrl.Result{}, fmt.Errorf("ensuring connector: %w", err)
+	}
+	if msg := statusMessage(t, ready); ready != t.Status.ConnectorReady || msg != t.Status.Message {
+		t.Status.ConnectorReady = ready
+		t.Status.Message = msg
+		if err := r.Status().Update(ctx, t); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	wait := maxRequeue
@@ -118,12 +169,19 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 }
 
 // provision drives Pending/Failed objects to Active. Every step is safe to
-// repeat: the tunnel ID is persisted right after creation, and the DNS call is
-// idempotent, so a retry never creates a second tunnel.
+// repeat, and the order matters:
+//
+//  1. tunnel + credentials (IDs recorded immediately, so retries never leak),
+//  2. Access policy, so the hostname is protected before it exists,
+//  3. DNS, which is what makes the hostname reachable,
+//  4. the cloudflared connector.
+//
+// If the Access policy cannot be created, nothing after it runs: the hostname
+// never goes live unprotected.
 func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	ttl, err := parseTTL(t.Spec.TTL)
+	ttl, err := validate(t)
 	if err != nil {
 		// A spec error cannot be fixed by retrying; wait for the user to edit it.
 		t.Status.Phase = agentopsv1alpha1.PhaseFailed
@@ -137,22 +195,36 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		if err != nil {
 			return r.fail(ctx, t, fmt.Errorf("creating tunnel: %w", err))
 		}
+		hostname := r.hostname(t)
+		// Cloudflare returns the tunnel secret only once, so it is stored
+		// before anything else can fail.
+		if err := r.writeConnectorSecret(ctx, t, info, hostname); err != nil {
+			r.discardTunnel(ctx, info.ID)
+			return r.fail(ctx, t, fmt.Errorf("storing connector credentials: %w", err))
+		}
 		t.Status.TunnelID = info.ID
-		t.Status.Hostname = r.hostname(t)
+		t.Status.Hostname = hostname
 		t.Status.Phase = agentopsv1alpha1.PhasePending
-		t.Status.Message = "tunnel created; configuring DNS"
+		t.Status.Message = "tunnel created; configuring access and DNS"
 		if err := r.Status().Update(ctx, t); err != nil {
 			// If the ID cannot be recorded no later reconcile can clean the
 			// tunnel up, so remove it now rather than leak it.
-			if delErr := r.CloudflareClient.DeleteTunnel(ctx, info.ID); delErr != nil {
-				logger.Error(delErr, "Failed to remove tunnel after status update failure; it may be orphaned", "tunnelID", info.ID)
-			}
+			r.discardTunnel(ctx, info.ID)
 			return ctrl.Result{}, err
 		}
 	}
 
+	if err := r.ensureAccess(ctx, t); err != nil {
+		return r.fail(ctx, t, err)
+	}
+
 	if err := r.CloudflareClient.CreateDNSRecord(ctx, t.Spec.Cloudflare.ZoneID, t.Status.Hostname, t.Status.TunnelID); err != nil {
 		return r.fail(ctx, t, fmt.Errorf("creating DNS record: %w", err))
+	}
+
+	ready, err := r.ensureConnector(ctx, t)
+	if err != nil {
+		return r.fail(ctx, t, fmt.Errorf("running connector: %w", err))
 	}
 
 	if t.Status.ExpiresAt == nil && ttl > 0 {
@@ -160,17 +232,18 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		t.Status.ExpiresAt = &exp
 	}
 	t.Status.Phase = agentopsv1alpha1.PhaseActive
-	t.Status.Message = ""
+	t.Status.ConnectorReady = ready
+	t.Status.Message = statusMessage(t, ready)
 	if err := r.Status().Update(ctx, t); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("AgentEdgeTunnel is active", "hostname", t.Status.Hostname)
+	logger.Info("AgentEdgeTunnel is active", "hostname", t.Status.Hostname, "connectorReady", ready)
 	return ctrl.Result{RequeueAfter: maxRequeue}, nil
 }
 
 // fail records a transient error in status and returns it so the controller
-// retries with backoff. The tunnel ID, if any, stays recorded.
+// retries with backoff. IDs already recorded stay recorded.
 func (r *AgentEdgeTunnelReconciler) fail(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, cause error) (ctrl.Result, error) {
 	t.Status.Phase = agentopsv1alpha1.PhaseFailed
 	t.Status.Message = cause.Error()
@@ -180,21 +253,285 @@ func (r *AgentEdgeTunnelReconciler) fail(ctx context.Context, t *agentopsv1alpha
 	return ctrl.Result{}, cause
 }
 
-// cleanup removes the DNS record, then the tunnel. The tunnel is only deleted
-// once DNS is gone, so a retry still has the tunnel ID to work with.
+// discardTunnel removes a tunnel whose ID could not be recorded.
+func (r *AgentEdgeTunnelReconciler) discardTunnel(ctx context.Context, tunnelID string) {
+	if err := r.CloudflareClient.DeleteTunnel(ctx, tunnelID); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to remove an unrecorded tunnel; it may be orphaned", "tunnelID", tunnelID)
+	}
+}
+
+// ensureAccess creates the Access application and policy once. Its ID is
+// recorded immediately so cleanup can find it.
+func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	emails := t.Spec.Security.AllowedEmails
+	if len(emails) == 0 || t.Status.AccessAppID != "" {
+		return nil
+	}
+	appID, err := r.CloudflareClient.CreateAccessPolicy(ctx, r.AccountID, tunnelName(t), t.Status.Hostname, emails)
+	if err != nil {
+		return fmt.Errorf("creating Access policy: %w", err)
+	}
+	t.Status.AccessAppID = appID
+	if err := r.Status().Update(ctx, t); err != nil {
+		if delErr := r.CloudflareClient.DeleteAccessApplication(ctx, r.AccountID, appID); delErr != nil {
+			log.FromContext(ctx).Error(delErr, "Failed to remove an unrecorded Access application; it may be orphaned", "appID", appID)
+		}
+		t.Status.AccessAppID = ""
+		return err
+	}
+	return nil
+}
+
+// cleanup removes everything the tunnel created, in an order that lets each
+// step succeed: the connector goes first (Cloudflare will not delete a tunnel
+// that still has live connections), then DNS and Access, then the tunnel. The
+// tunnel is last so a retry still has its ID. Every step is idempotent.
 func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
 	if t.Status.TunnelID == "" {
 		return nil
+	}
+	if err := r.deleteConnector(ctx, t); err != nil {
+		return fmt.Errorf("removing connector: %w", err)
 	}
 	if t.Status.Hostname != "" {
 		if err := r.CloudflareClient.DeleteDNSRecord(ctx, t.Spec.Cloudflare.ZoneID, t.Status.Hostname, t.Status.TunnelID); err != nil {
 			return fmt.Errorf("deleting DNS record: %w", err)
 		}
 	}
+	if t.Status.AccessAppID != "" {
+		if err := r.CloudflareClient.DeleteAccessApplication(ctx, r.AccountID, t.Status.AccessAppID); err != nil {
+			return fmt.Errorf("deleting Access application: %w", err)
+		}
+	}
 	if err := r.CloudflareClient.DeleteTunnel(ctx, t.Status.TunnelID); err != nil {
 		return fmt.Errorf("deleting tunnel: %w", err)
 	}
 	return nil
+}
+
+// --- connector workload -----------------------------------------------------
+
+func connectorName(t *agentopsv1alpha1.AgentEdgeTunnel) string {
+	return t.Name + "-cloudflared"
+}
+
+func connectorLabels(t *agentopsv1alpha1.AgentEdgeTunnel) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":     "cloudflared",
+		"app.kubernetes.io/instance": t.Name,
+		managedByLabel:               managedByValue,
+	}
+}
+
+// connectorConfig renders cloudflared's config.yaml. Everything interpolated
+// is validated: the service name and port by the CRD, the hostname by the CRD
+// pattern plus the operator's base domain.
+func connectorConfig(tunnelID, hostname string, svc *agentopsv1alpha1.ServiceTarget, namespace string) string {
+	return fmt.Sprintf(`tunnel: %s
+credentials-file: %s/%s
+ingress:
+  - hostname: %s
+    service: http://%s.%s.svc:%d
+  - service: http_status:404
+`, tunnelID, connectorConfigDir, credentialsKey, hostname, svc.Name, namespace, svc.Port)
+}
+
+// writeConnectorSecret stores the tunnel credentials and cloudflared config.
+// It overwrites a Secret this tunnel already owns (left by an earlier failed
+// attempt) and refuses to touch one it does not own.
+func (r *AgentEdgeTunnelReconciler) writeConnectorSecret(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, info *cf.TunnelInfo, hostname string) error {
+	if t.Spec.Service == nil {
+		return nil
+	}
+	creds, err := json.Marshal(struct {
+		AccountTag   string
+		TunnelSecret string
+		TunnelID     string
+	}{info.AccountID, info.Secret, info.ID})
+	if err != nil {
+		return err
+	}
+
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: connectorName(t), Namespace: t.Namespace}}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		if secret.ResourceVersion != "" && !metav1.IsControlledBy(secret, t) {
+			return fmt.Errorf("secret %q already exists and is not managed by this AgentEdgeTunnel; refusing to overwrite it", secret.Name)
+		}
+		secret.Labels = connectorLabels(t)
+		secret.Type = corev1.SecretTypeOpaque
+		secret.Data = map[string][]byte{
+			credentialsKey: creds,
+			configKey:      []byte(connectorConfig(info.ID, hostname, t.Spec.Service, t.Namespace)),
+		}
+		return controllerutil.SetControllerReference(t, secret, r.Scheme)
+	})
+	return err
+}
+
+// ensureConnector keeps the cloudflared Deployment in its desired state and
+// reports whether it is connected. With no spec.service there is nothing to run.
+func (r *AgentEdgeTunnelReconciler) ensureConnector(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (bool, error) {
+	if t.Spec.Service == nil {
+		return false, nil
+	}
+
+	// Cloudflare only returns the tunnel credentials at creation, so a missing
+	// Secret cannot be regenerated.
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &secret); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			return false, fmt.Errorf("connector credentials Secret %q is missing; Cloudflare returns them only once, so delete and recreate this AgentEdgeTunnel", connectorName(t))
+		}
+		return false, err
+	}
+
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: connectorName(t), Namespace: t.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+		return r.mutateConnector(dep, t)
+	}); err != nil {
+		return false, err
+	}
+	return dep.Status.ReadyReplicas > 0, nil
+}
+
+// mutateConnector sets the desired state on dep in place.
+func (r *AgentEdgeTunnelReconciler) mutateConnector(dep *appsv1.Deployment, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	if dep.ResourceVersion != "" && !metav1.IsControlledBy(dep, t) {
+		return fmt.Errorf("deployment %q already exists and is not managed by this AgentEdgeTunnel; refusing to adopt it", dep.Name)
+	}
+
+	labels := connectorLabels(t)
+	dep.Labels = labels
+	if dep.Spec.Selector == nil { // immutable after creation
+		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+	}
+	// One connector per tunnel. Running two would add redundancy at the cost of
+	// a second set of edge connections; make it a field if that is needed.
+	dep.Spec.Replicas = int32Ptr(1)
+
+	dep.Spec.Template.Labels = labels
+	ps := &dep.Spec.Template.Spec
+	// cloudflared never talks to the Kubernetes API.
+	ps.AutomountServiceAccountToken = boolPtr(false)
+	ps.SecurityContext = &corev1.PodSecurityContext{
+		RunAsNonRoot:   boolPtr(true),
+		RunAsUser:      int64Ptr(connectorUID),
+		RunAsGroup:     int64Ptr(connectorUID),
+		FSGroup:        int64Ptr(connectorUID),
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+	ps.Volumes = []corev1.Volume{
+		{Name: "config", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  connectorName(t),
+			DefaultMode: int32Ptr(0o440),
+		}}},
+		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	// Defaults the API server would otherwise fill in are set explicitly. The
+	// container list is replaced wholesale, so leaving them out would make every
+	// reconcile look like a change and send a needless update.
+	ps.Containers = []corev1.Container{{
+		Name:            "cloudflared",
+		Image:           r.ConnectorImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Args: []string{
+			"tunnel", "--no-autoupdate",
+			"--metrics", fmt.Sprintf("0.0.0.0:%d", connectorMetricsPort),
+			"--config", connectorConfigDir + "/" + configKey,
+			"run",
+		},
+		Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: connectorMetricsPort, Protocol: corev1.ProtocolTCP}},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path: "/ready", Port: intstr.FromInt32(connectorMetricsPort), Scheme: corev1.URISchemeHTTP,
+			}},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   1,
+			SuccessThreshold: 1,
+			FailureThreshold: 3,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "config", MountPath: connectorConfigDir, ReadOnly: true},
+			{Name: "tmp", MountPath: "/tmp"},
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("50m"),
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+			Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: boolPtr(false),
+			ReadOnlyRootFilesystem:   boolPtr(true),
+			RunAsNonRoot:             boolPtr(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		},
+		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+	}}
+	return controllerutil.SetControllerReference(t, dep, r.Scheme)
+}
+
+// deleteConnector removes the connector Deployment and Secret, but only if
+// this tunnel owns them.
+func (r *AgentEdgeTunnelReconciler) deleteConnector(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	if t.Spec.Service == nil {
+		return nil
+	}
+	meta := metav1.ObjectMeta{Name: connectorName(t), Namespace: t.Namespace}
+	for _, obj := range []client.Object{
+		&appsv1.Deployment{ObjectMeta: meta},
+		&corev1.Secret{ObjectMeta: meta},
+	} {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+			if client.IgnoreNotFound(err) == nil {
+				continue
+			}
+			return err
+		}
+		if !metav1.IsControlledBy(obj, t) {
+			continue
+		}
+		if err := client.IgnoreNotFound(r.Delete(ctx, obj)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func statusMessage(t *agentopsv1alpha1.AgentEdgeTunnel, connectorReady bool) string {
+	switch {
+	case t.Spec.Service == nil:
+		return "no spec.service: the tunnel exists but is not connected to any workload"
+	case !connectorReady:
+		return "waiting for the cloudflared connector to connect"
+	}
+	return ""
+}
+
+// --- helpers ----------------------------------------------------------------
+
+// validate checks the spec and returns the parsed TTL. Spec errors are not
+// retried.
+func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
+	ttl, err := parseTTL(t.Spec.TTL)
+	if err != nil {
+		return 0, err
+	}
+	sec := t.Spec.Security
+	// The CRD rejects these too; checking here covers an out-of-date CRD.
+	if sec.WebhookValidation != nil || sec.ServiceTokens {
+		return 0, errors.New("security.webhookValidation and security.serviceTokens are not implemented yet and would not be enforced")
+	}
+	// A tunnel is never public by omission.
+	if len(sec.AllowedEmails) == 0 && !sec.AllowPublic {
+		return 0, errors.New("no access policy: set security.allowedEmails, or security.allowPublic: true to expose the hostname without authentication")
+	}
+	if len(sec.AllowedEmails) > 0 && sec.AllowPublic {
+		return 0, errors.New("security.allowedEmails and security.allowPublic are mutually exclusive")
+	}
+	return ttl, nil
 }
 
 func (r *AgentEdgeTunnelReconciler) hostname(t *agentopsv1alpha1.AgentEdgeTunnel) string {
@@ -225,8 +562,13 @@ func parseTTL(s string) (time.Duration, error) {
 	return d, nil
 }
 
+func boolPtr(b bool) *bool    { return &b }
+func int32Ptr(i int32) *int32 { return &i }
+func int64Ptr(i int64) *int64 { return &i }
+
 func (r *AgentEdgeTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentopsv1alpha1.AgentEdgeTunnel{}).
+		Owns(&appsv1.Deployment{}).
 		Complete(r)
 }

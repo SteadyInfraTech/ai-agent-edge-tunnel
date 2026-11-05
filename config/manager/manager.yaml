@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-tunnel-controller-manager
+  labels:
+    app.kubernetes.io/name: ai-agent-edge-tunnel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-agent-edge-tunnel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-agent-edge-tunnel
+    spec:
+      serviceAccountName: edge-tunnel-controller-manager
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: manager
+        image: controller:latest
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8080
+        env:
+        # Required. Left empty on purpose: the operator refuses to start until
+        # these are set, rather than guessing a domain or an image.
+        - name: EDGE_BASE_DOMAIN
+          value: ""        # e.g. agents.example.com (a zone you control in Cloudflare)
+        - name: CONNECTOR_IMAGE
+          value: ""        # cloudflared image, pinned to a version or digest
+        # Create this Secret first:
+        #   kubectl -n edge-tunnel-system create secret generic edge-tunnel-cloudflare \
+        #     --from-literal=account-id=... --from-literal=api-token=...
+        - name: CLOUDFLARE_ACCOUNT_ID
+          valueFrom:
+            secretKeyRef: {name: edge-tunnel-cloudflare, key: account-id}
+        - name: CLOUDFLARE_API_TOKEN
+          valueFrom:
+            secretKeyRef: {name: edge-tunnel-cloudflare, key: api-token}
+        ports:
+        - name: metrics
+          containerPort: 8080
+        - name: health
+          containerPort: 8081
+        livenessProbe:
+          httpGet: {path: /healthz, port: health}
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet: {path: /readyz, port: health}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]

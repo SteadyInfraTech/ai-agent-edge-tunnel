@@ -27,3 +27,19 @@ func TestFakeOnlyDeletesRecordsOwnedByTunnel(t *testing.T) {
 	require.NoError(t, c.DeleteTunnel(ctx, info.ID))
 	assert.Empty(t, c.Tunnels)
 }
+
+func TestFakeAccessApplicationLifecycle(t *testing.T) {
+	c := New()
+	ctx := context.Background()
+
+	id, err := c.CreateAccessPolicy(ctx, "acct", "name", "a.example.com", []string{"dev@example.com"})
+	require.NoError(t, err)
+	assert.Equal(t, "a.example.com", c.AccessApps[id].Domain)
+
+	// Deletion is by ID only, and deleting something already gone is fine.
+	require.NoError(t, c.DeleteAccessApplication(ctx, "acct", "not-an-id"))
+	assert.Contains(t, c.AccessApps, id)
+	require.NoError(t, c.DeleteAccessApplication(ctx, "acct", id))
+	require.NoError(t, c.DeleteAccessApplication(ctx, "acct", id))
+	assert.Empty(t, c.AccessApps)
+}

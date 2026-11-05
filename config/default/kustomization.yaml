@@ -1,0 +1,10 @@
+# kubectl apply -k config/default
+#
+# Before applying, create the Cloudflare credentials Secret and set
+# EDGE_BASE_DOMAIN and CONNECTOR_IMAGE (see config/manager/manager.yaml).
+namespace: edge-tunnel-system
+resources:
+- namespace.yaml
+- ../crd
+- ../rbac
+- ../manager

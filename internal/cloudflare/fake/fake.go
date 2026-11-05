@@ -19,21 +19,30 @@ type Client struct {
 
 	Tunnels    map[string]*cloudflare.TunnelInfo // by tunnel ID
 	DNSRecords map[string]string                 // hostname -> tunnel ID
-	Policies   map[string][]string               // domain -> allowed emails
+	AccessApps map[string]AccessApp              // app ID -> app
 
 	CreateTunnelCalls int
+	CreateAccessCalls int
 
 	CreateTunnelErr error
 	CreateDNSErr    error
+	CreateAccessErr error
 	DeleteTunnelErr error
 	DeleteDNSErr    error
+	DeleteAccessErr error
+}
+
+// AccessApp is a recorded Access application.
+type AccessApp struct {
+	Domain string
+	Emails []string
 }
 
 func New() *Client {
 	return &Client{
 		Tunnels:    make(map[string]*cloudflare.TunnelInfo),
 		DNSRecords: make(map[string]string),
-		Policies:   make(map[string][]string),
+		AccessApps: make(map[string]AccessApp),
 	}
 }
 
@@ -46,11 +55,12 @@ func (c *Client) CreateTunnel(_ context.Context, name string) (*cloudflare.Tunne
 	}
 	id := fmt.Sprintf("fake-tunnel-%d", c.CreateTunnelCalls)
 	info := &cloudflare.TunnelInfo{
-		ID:       id,
-		Name:     name,
-		Secret:   "fake-secret",
-		Hostname: fmt.Sprintf("%s.cfargotunnel.com", id),
-		Token:    "fake-token",
+		AccountID: "fake-account",
+		ID:        id,
+		Name:      name,
+		Secret:    "fake-secret",
+		Hostname:  fmt.Sprintf("%s.cfargotunnel.com", id),
+		Token:     "fake-token",
 	}
 	c.Tunnels[id] = info
 	return info, nil
@@ -66,11 +76,16 @@ func (c *Client) CreateDNSRecord(_ context.Context, _, hostname, tunnelID string
 	return nil
 }
 
-func (c *Client) CreateAccessPolicy(_ context.Context, _, _, domain string, allowedEmails []string) error {
+func (c *Client) CreateAccessPolicy(_ context.Context, _, _, domain string, allowedEmails []string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.Policies[domain] = allowedEmails
-	return nil
+	c.CreateAccessCalls++
+	if c.CreateAccessErr != nil {
+		return "", c.CreateAccessErr
+	}
+	id := fmt.Sprintf("fake-access-%d", c.CreateAccessCalls)
+	c.AccessApps[id] = AccessApp{Domain: domain, Emails: allowedEmails}
+	return id, nil
 }
 
 func (c *Client) DeleteTunnel(_ context.Context, tunnelID string) error {
@@ -95,9 +110,12 @@ func (c *Client) DeleteDNSRecord(_ context.Context, _, hostname, tunnelID string
 	return nil
 }
 
-func (c *Client) DeleteAccessPolicy(_ context.Context, _, domain string) error {
+func (c *Client) DeleteAccessApplication(_ context.Context, _, appID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.Policies, domain)
+	if c.DeleteAccessErr != nil {
+		return c.DeleteAccessErr
+	}
+	delete(c.AccessApps, appID)
 	return nil
 }

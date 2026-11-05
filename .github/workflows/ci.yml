@@ -41,6 +41,12 @@ jobs:
       - name: Build Operator Binary
         run: go build -o bin/manager ./cmd
 
+      - name: Render Kubernetes manifests
+        run: kubectl kustomize config/default > /dev/null
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
   live-test:
     name: Live Cloudflare API test
     runs-on: ubuntu-latest
