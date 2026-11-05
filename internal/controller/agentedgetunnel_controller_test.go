@@ -33,9 +33,14 @@ type harness struct {
 	now time.Time
 }
 
-// newHarness builds a reconciler around one AgentEdgeTunnel; mutate adjusts the
-// object before it is stored.
-func newHarness(t *testing.T, ttl string) *harness {
+// withTTL sets the object's ttl.
+func withTTL(ttl string) func(*agentopsv1alpha1.AgentEdgeTunnel) {
+	return func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.TTL = ttl }
+}
+
+// newHarness builds a reconciler around one AgentEdgeTunnel with a one hour ttl;
+// mutate, if not nil, adjusts the object before it is stored.
+func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel)) *harness {
 	t.Helper()
 	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme.Scheme))
 
@@ -44,9 +49,12 @@ func newHarness(t *testing.T, ttl string) *harness {
 		Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{
 			TargetPodSelector: map[string]string{"app": "langgraph-agent"},
 			Cloudflare:        agentopsv1alpha1.CloudflareConfig{ZoneID: "zone", Subdomain: "agent-job-001"},
-			TTL:               ttl,
+			TTL:               "1h",
 			CleanupOnFinish:   true,
 		},
+	}
+	if mutate != nil {
+		mutate(cr)
 	}
 	k8s := fakeclient.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(cr).WithStatusSubresource(cr).Build()
 	h := &harness{
@@ -80,7 +88,7 @@ func (h *harness) get() agentopsv1alpha1.AgentEdgeTunnel {
 }
 
 func TestProvisionsTunnel(t *testing.T) {
-	h := newHarness(t, "1h")
+	h := newHarness(t, withTTL("1h"))
 
 	res, err := h.reconcile()
 	require.NoError(t, err)
@@ -97,7 +105,7 @@ func TestProvisionsTunnel(t *testing.T) {
 }
 
 func TestTTLExpiryTerminatesAndDoesNotReprovision(t *testing.T) {
-	h := newHarness(t, "1h")
+	h := newHarness(t, withTTL("1h"))
 	_, err := h.reconcile()
 	require.NoError(t, err)
 	require.Equal(t, 1, h.cf.CreateTunnelCalls)
@@ -119,7 +127,7 @@ func TestTTLExpiryTerminatesAndDoesNotReprovision(t *testing.T) {
 }
 
 func TestRetryAfterDNSFailureDoesNotLeakTunnels(t *testing.T) {
-	h := newHarness(t, "")
+	h := newHarness(t, withTTL(""))
 	h.cf.CreateDNSErr = errors.New("cloudflare is down")
 
 	_, err := h.reconcile()
@@ -139,7 +147,7 @@ func TestRetryAfterDNSFailureDoesNotLeakTunnels(t *testing.T) {
 }
 
 func TestDeleteRunsCleanupViaFinalizer(t *testing.T) {
-	h := newHarness(t, "1h")
+	h := newHarness(t, withTTL("1h"))
 	_, err := h.reconcile()
 	require.NoError(t, err)
 	require.Len(t, h.cf.Tunnels, 1)
@@ -158,7 +166,7 @@ func TestDeleteRunsCleanupViaFinalizer(t *testing.T) {
 }
 
 func TestCleanupFailureKeepsFinalizer(t *testing.T) {
-	h := newHarness(t, "1h")
+	h := newHarness(t, withTTL("1h"))
 	_, err := h.reconcile()
 	require.NoError(t, err)
 
@@ -180,7 +188,7 @@ func TestCleanupFailureKeepsFinalizer(t *testing.T) {
 }
 
 func TestInvalidTTLFailsWithoutCreatingTunnel(t *testing.T) {
-	h := newHarness(t, "not-a-duration")
+	h := newHarness(t, withTTL("not-a-duration"))
 
 	res, err := h.reconcile()
 	require.NoError(t, err, "a spec error is not retried")
@@ -255,7 +263,7 @@ func TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
 		cr.Finalizers = []string{FinalizerName}
 		cr.Status = agentopsv1alpha1.AgentEdgeTunnelStatus{
-			Phase: agentopsv1alpha1.PhaseActive, TunnelID: "6f1c2b3a-real", Hostname: testHostname,
+			Phase: agentopsv1alpha1.PhaseActive, TunnelID: "6f1c2b3a-real", Hostname: "agent-job-001.agents.example.com",
 		}
 	})
 
