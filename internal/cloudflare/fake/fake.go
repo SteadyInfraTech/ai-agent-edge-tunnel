@@ -59,12 +59,17 @@ func (c *Client) CreateTunnel(_ context.Context, name string) (*cloudflare.Tunne
 	return info, nil
 }
 
-// CreateDNSRecord records hostname as pointing at tunnelID.
+// CreateDNSRecord records hostname as pointing at tunnelID. Like the real
+// client, it is idempotent for the same tunnel and refuses to take over a
+// hostname that already points somewhere else.
 func (c *Client) CreateDNSRecord(_ context.Context, _, hostname, tunnelID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.CreateDNSErr != nil {
 		return c.CreateDNSErr
+	}
+	if owner, ok := c.DNSRecords[hostname]; ok && owner != tunnelID {
+		return fmt.Errorf("DNS record %q already exists and points at %q, not %q", hostname, owner, tunnelID)
 	}
 	c.DNSRecords[hostname] = tunnelID
 	return nil
