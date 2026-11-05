@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/cloudflare/cloudflare-go"
 )
@@ -142,12 +143,30 @@ func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID
 	return nil
 }
 
+// DeleteTunnel treats "already gone" as success so cleanup converges when a
+// tunnel was removed outside the operator. Any other failure (rate limits,
+// 5xx, auth) is returned so the caller retries.
 func (c *RealCloudflareClient) DeleteTunnel(ctx context.Context, tunnelID string) error {
 	err := c.api.DeleteTunnel(ctx, cloudflare.AccountIdentifier(c.AccountID), tunnelID)
 	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to delete Cloudflare tunnel: %w", err)
 	}
 	return nil
+}
+
+// isNotFound reports whether err is a Cloudflare HTTP 404. The SDK surfaces
+// 404s as *cloudflare.NotFoundError; the *cloudflare.Error check also covers
+// the base type.
+func isNotFound(err error) bool {
+	var nf *cloudflare.NotFoundError
+	if errors.As(err, &nf) {
+		return true
+	}
+	var apiErr *cloudflare.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 // DeleteDNSRecord deletes the CNAME records for hostname that point at

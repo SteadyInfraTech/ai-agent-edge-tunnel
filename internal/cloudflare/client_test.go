@@ -2,12 +2,28 @@ package cloudflare
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"strconv"
 	"testing"
+	"time"
 
+	"github.com/cloudflare/cloudflare-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestIsNotFound(t *testing.T) {
+	notFound := cloudflare.NewNotFoundError(&cloudflare.Error{StatusCode: 404, Type: cloudflare.ErrorTypeNotFound})
+	serverErr := cloudflare.NewServiceError(&cloudflare.Error{StatusCode: 500, Type: cloudflare.ErrorTypeService})
+
+	assert.True(t, isNotFound(notFound))
+	assert.True(t, isNotFound(fmt.Errorf("wrapped: %w", notFound)), "must see through wrapping")
+	assert.False(t, isNotFound(serverErr), "5xx must still be retried")
+	assert.False(t, isNotFound(errors.New("boom")))
+	assert.False(t, isNotFound(nil))
+}
 
 func TestLiveCloudflareTunnel(t *testing.T) {
 	apiToken := os.Getenv("CLOUDFLARE_API_TOKEN")
@@ -26,7 +42,14 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 
 	ctx := context.Background()
 
-	info, err := client.CreateTunnel(ctx, "ci-test-agent-tunnel")
+	// Unique per run: Cloudflare rejects duplicate tunnel names and DNS records,
+	// so overlapping runs (or a leftover from a crashed one) must not collide.
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	if hostname != "" {
+		hostname = suffix + "-" + hostname
+	}
+
+	info, err := client.CreateTunnel(ctx, "ci-test-agent-tunnel-"+suffix)
 	require.NoError(t, err)
 	require.NotNil(t, info)
 	// Always remove the tunnel, even if a later assertion fails.
@@ -35,6 +58,12 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 	})
 
 	if zoneID != "" && hostname != "" {
+		// Registered before creation so a failed second create or a failed
+		// explicit delete below still removes the record. DeleteDNSRecord is a
+		// no-op once the record is gone.
+		t.Cleanup(func() {
+			assert.NoError(t, client.DeleteDNSRecord(context.Background(), zoneID, hostname, info.ID))
+		})
 		require.NoError(t, client.CreateDNSRecord(ctx, zoneID, hostname, info.ID))
 		// Creating again must be a no-op, not an error.
 		require.NoError(t, client.CreateDNSRecord(ctx, zoneID, hostname, info.ID))

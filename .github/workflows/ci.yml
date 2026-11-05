@@ -13,15 +13,7 @@ jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
-    # Job-level env so the live-test step's `if:` can see it. A step's own
-    # `env:` is not visible to that same step's `if:`, which kept the live test
-    # from ever running. Secrets are empty on fork PRs, so it is skipped there.
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
-
+    # No Cloudflare credentials here: unit tests must never touch the live API.
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -46,9 +38,37 @@ jobs:
       - name: Run Unit Tests (Fake Cloudflare)
         run: go test -v -race ./...
 
-      - name: Run Live Cloudflare API Test (Optional)
-        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
-        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
-
       - name: Build Operator Binary
         run: go build -o bin/manager ./cmd
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Skip fork PRs, which cannot read secrets.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Live Cloudflare API Test
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
