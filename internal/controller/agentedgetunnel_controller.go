@@ -38,6 +38,10 @@ type AgentEdgeTunnelReconciler struct {
 	// DryRun is true when CloudflareClient is the in-memory fake. It keeps
 	// dry-run and real state apart: see reconcileMode.
 	DryRun bool
+	// APIReader reads straight from the API server, bypassing the cache. It is
+	// used to learn whether a status write that returned an error was stored
+	// anyway. Optional: it falls back to the (possibly cached) Client.
+	APIReader client.Reader
 	// Now is overridable for tests.
 	Now func() time.Time
 }
@@ -207,10 +211,22 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		t.Status.Phase = agentopsv1alpha1.PhasePending
 		t.Status.Message = "tunnel created; configuring DNS"
 		if err := r.Status().Update(ctx, t); err != nil {
-			// If the ID cannot be recorded no later reconcile can clean the
-			// tunnel up, so remove it now rather than leak it.
-			if delErr := r.CloudflareClient.DeleteTunnel(ctx, info.ID); delErr != nil {
-				logger.Error(delErr, "Failed to remove tunnel after status update failure; it may be orphaned", "tunnelID", info.ID)
+			// An error does not prove the write was rejected: a timeout can
+			// still have stored the ID. Deleting the tunnel then would leave
+			// status pointing at a tunnel that no longer exists, and every
+			// retry would reuse that dead ID. So only delete when the API
+			// server confirms the ID was not stored. If that cannot be
+			// confirmed, keep the tunnel: a leak is logged with its ID and
+			// can be removed, a silently dead ID cannot be noticed.
+			switch stored, readErr := r.statusHoldsTunnel(ctx, t, info.ID); {
+			case readErr != nil:
+				logger.Error(readErr, "Status write failed and the stored state is unknown; keeping the tunnel, it may be orphaned if the write was lost", "tunnelID", info.ID, "tunnelName", tunnelName(t))
+			case stored:
+				logger.Info("Status write reported an error but the tunnel ID was stored; keeping the tunnel", "tunnelID", info.ID)
+			default:
+				if delErr := r.CloudflareClient.DeleteTunnel(ctx, info.ID); delErr != nil {
+					logger.Error(delErr, "Failed to remove tunnel after status update failure; it may be orphaned", "tunnelID", info.ID, "tunnelName", tunnelName(t))
+				}
 			}
 			return ctrl.Result{}, err
 		}
@@ -232,6 +248,20 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 
 	logger.Info("AgentEdgeTunnel is active", "hostname", t.Status.Hostname)
 	return ctrl.Result{RequeueAfter: maxRequeue}, nil
+}
+
+// statusHoldsTunnel re-reads the object from the API server and reports whether
+// its stored status records tunnelID.
+func (r *AgentEdgeTunnelReconciler) statusHoldsTunnel(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, tunnelID string) (bool, error) {
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	var cur agentopsv1alpha1.AgentEdgeTunnel
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(t), &cur); err != nil {
+		return false, err
+	}
+	return cur.Status.TunnelID == tunnelID, nil
 }
 
 // fail records a transient error in status and returns it so the controller

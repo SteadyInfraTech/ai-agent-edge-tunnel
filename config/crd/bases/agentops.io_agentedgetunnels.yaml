@@ -34,6 +34,11 @@ spec:
         # controller with empty Cloudflare settings.
         required:
         - spec
+        # expiresAt is fixed when the tunnel becomes Active and the controller
+        # never re-reads spec.ttl, so a later edit would silently do nothing.
+        x-kubernetes-validations:
+        - rule: "!has(self.status) || !has(self.status.phase) || self.status.phase != 'Active' || (has(self.spec.ttl) ? self.spec.ttl : '') == (has(oldSelf.spec.ttl) ? oldSelf.spec.ttl : '')"
+          message: spec.ttl cannot change while the tunnel is Active; delete and recreate the object to change it
         properties:
           spec:
             type: object
