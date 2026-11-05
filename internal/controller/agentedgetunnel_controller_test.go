@@ -546,3 +546,59 @@ func TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, h.get().Finalizers, FinalizerName, "real resources may still exist")
 }
+
+// flakyStatusClient makes the status write that records a freshly created
+// tunnel report an error. With stored set, the write is applied first, like a
+// request that timed out after the API server had accepted it.
+type flakyStatusClient struct {
+	client.Client
+	stored bool
+	failed bool
+}
+
+func (c *flakyStatusClient) Status() client.SubResourceWriter {
+	return &flakyStatusWriter{SubResourceWriter: c.Client.Status(), c: c}
+}
+
+type flakyStatusWriter struct {
+	client.SubResourceWriter
+	c *flakyStatusClient
+}
+
+func (w *flakyStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	t, ok := obj.(*agentopsv1alpha1.AgentEdgeTunnel)
+	if ok && !w.c.failed && t.Status.TunnelID != "" && t.Status.Phase == agentopsv1alpha1.PhasePending {
+		w.c.failed = true
+		if w.c.stored {
+			if err := w.SubResourceWriter.Update(ctx, obj, opts...); err != nil {
+				return err
+			}
+		}
+		return errors.New("etcdserver: request timed out")
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+func TestStatusWriteFailureDeletesTunnelOnlyWhenIDWasNotStored(t *testing.T) {
+	for name, stored := range map[string]bool{"write lost": false, "write applied despite error": true} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			h.r.Client = &flakyStatusClient{Client: h.k8s, stored: stored}
+
+			_, err := h.reconcile()
+			require.Error(t, err)
+
+			if stored {
+				assert.Len(t, h.cf.Tunnels, 1, "the stored ID must keep pointing at a live tunnel")
+				assert.NotEmpty(t, h.get().Status.TunnelID)
+				_, err = h.reconcile()
+				require.NoError(t, err)
+				assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+				assert.Equal(t, 1, h.cf.CreateTunnelCalls, "the retry must reuse the stored tunnel")
+			} else {
+				assert.Empty(t, h.cf.Tunnels, "an unrecorded tunnel must not leak")
+				assert.Empty(t, h.get().Status.TunnelID)
+			}
+		})
+	}
+}

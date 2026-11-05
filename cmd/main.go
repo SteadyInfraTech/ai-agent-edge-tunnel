@@ -121,6 +121,7 @@ func main() {
 	if err = (&controller.AgentEdgeTunnelReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
+		APIReader:        mgr.GetAPIReader(),
 		CloudflareClient: cfClient,
 		AccountID:        accountID,
 		BaseDomain:       baseDomain,
