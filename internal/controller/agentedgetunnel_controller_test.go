@@ -30,6 +30,7 @@ const (
 	testImage    = "example.invalid/cloudflared:test"
 )
 
+// harness wires a reconciler to a fake Kubernetes client and a fake Cloudflare.
 type harness struct {
 	t   *testing.T
 	k8s client.Client
@@ -77,7 +78,9 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 		AccountID:        "fake-account",
 		BaseDomain:       "agents.example.com",
 		ConnectorImage:   testImage,
-		Now:              func() time.Time { return h.now },
+		// The harness uses the in-memory fake, which is what --dry-run runs on.
+		DryRun: true,
+		Now:    func() time.Time { return h.now },
 	}
 	return h
 }
@@ -466,4 +469,80 @@ func TestTunnelNameIsUniquePerNamespace(t *testing.T) {
 	a := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "team-a", UID: "aaaaaaaa-1111"}}
 	b := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "team-b", UID: "bbbbbbbb-2222"}}
 	assert.NotEqual(t, tunnelName(a), tunnelName(b))
+}
+
+func TestEmptyCloudflareSettingsFailBeforeCreatingAnything(t *testing.T) {
+	// A resource without spec.cloudflare must never reach Cloudflare, even if the
+	// CRD that should reject it is out of date.
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.Cloudflare = agentopsv1alpha1.CloudflareConfig{} })
+
+	res, err := h.reconcile()
+	require.NoError(t, err, "a spec error is not retried")
+	assert.Zero(t, res.RequeueAfter)
+
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseFailed, got.Status.Phase)
+	assert.Contains(t, got.Status.Message, "zoneID")
+	assert.Zero(t, h.cf.CreateTunnelCalls)
+}
+
+func TestRealModeDiscardsStatusWrittenByDryRun(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile() // dry-run provisions against the fake
+	require.NoError(t, err)
+	fakeID := h.get().Status.TunnelID
+	require.True(t, strings.HasPrefix(fakeID, "dryrun-"), "fake IDs must be recognisable, got %q", fakeID)
+
+	// The same object is now picked up by a real operator.
+	h.r.DryRun = false
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.True(t, res.Requeue, "state is reset and the object is reconciled again")
+
+	got := h.get()
+	assert.Empty(t, got.Status.TunnelID, "fake IDs must not stay authoritative")
+	assert.Empty(t, got.Status.Phase, "the object must be provisioned again, not left Active")
+	assert.Contains(t, h.cf.Tunnels, fakeID, "a real operator must not pretend to delete a fake tunnel")
+}
+
+func TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+	h.r.DryRun = false
+
+	_, err = h.reconcile() // forgets the fake state
+	require.NoError(t, err)
+	_, err = h.reconcile() // nothing real to clean: releases the finalizer
+	require.NoError(t, err)
+
+	var gone agentopsv1alpha1.AgentEdgeTunnel
+	assert.True(t, apierrors.IsNotFound(h.k8s.Get(context.Background(), h.req.NamespacedName, &gone)))
+	assert.Len(t, h.cf.Tunnels, 1, "the fake tunnel was never touched by the real-mode operator")
+}
+
+func TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer(t *testing.T) {
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
+		cr.Finalizers = []string{FinalizerName}
+		cr.Status = agentopsv1alpha1.AgentEdgeTunnelStatus{
+			Phase: agentopsv1alpha1.PhaseActive, TunnelID: "6f1c2b3a-real", Hostname: testHostname,
+		}
+	})
+
+	// Reconciling must not create, change or "clean up" anything.
+	_, err := h.reconcile()
+	require.Error(t, err)
+	assert.Zero(t, h.cf.CreateTunnelCalls)
+	assert.Equal(t, "6f1c2b3a-real", h.get().Status.TunnelID)
+
+	// Deleting the object must not drop the finalizer: the fake would report
+	// success without removing the real tunnel.
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, h.get().Finalizers, FinalizerName, "real resources may still exist")
 }

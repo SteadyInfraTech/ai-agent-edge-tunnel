@@ -7,10 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/cloudflare/cloudflare-go"
 )
 
+// DryRunIDPrefix starts every ID handed out by the in-memory fake. It lets the
+// controller tell state written by --dry-run apart from state that refers to
+// real Cloudflare resources, so neither mode acts on the other's objects.
+const DryRunIDPrefix = "dryrun-"
+
+// IsDryRunID reports whether id was issued by the in-memory fake.
+func IsDryRunID(id string) bool { return strings.HasPrefix(id, DryRunIDPrefix) }
+
+// TunnelInfo describes a tunnel as returned by Cloudflare, including the
+// secret and token, which are only available at creation.
 type TunnelInfo struct {
 	// AccountID is the Cloudflare account that owns the tunnel.
 	AccountID string
@@ -87,6 +98,31 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 	}, nil
 }
 
+// selectCNAME returns the CNAME among records, and whether there is one. Other
+// record types at the same name are ignored: Cloudflare allows a TXT record
+// beside a CNAME and does not guarantee list order, so looking only at the first
+// record could reject a hostname that already has the right CNAME. A CNAME that
+// points at tunnelID is preferred over any other.
+func selectCNAME(records []cloudflare.DNSRecord, tunnelID string) (cloudflare.DNSRecord, bool) {
+	target := tunnelTarget(tunnelID)
+	var other *cloudflare.DNSRecord
+	for i := range records {
+		if records[i].Type != "CNAME" {
+			continue
+		}
+		if records[i].Content == target {
+			return records[i], true
+		}
+		if other == nil {
+			other = &records[i]
+		}
+	}
+	if other != nil {
+		return *other, true
+	}
+	return cloudflare.DNSRecord{}, false
+}
+
 // checkExistingRecord accepts a pre-existing record only if it is exactly what
 // CreateDNSRecord would have made: a proxied CNAME to the tunnel. A DNS-only
 // CNAME to the tunnel does not carry traffic, so it must not count as ready.
@@ -105,9 +141,10 @@ func tunnelTarget(tunnelID string) string {
 	return fmt.Sprintf("%s.cfargotunnel.com", tunnelID)
 }
 
-// CreateDNSRecord is idempotent: if the CNAME already points at the tunnel it
-// succeeds without changes, and if the name is taken by anything else it fails
-// instead of overwriting a record the operator does not own.
+// CreateDNSRecord is idempotent: if a proxied CNAME already points at the tunnel
+// it succeeds without changes, and if the name has a CNAME for anything else it
+// fails instead of overwriting a record the operator does not own. Other record
+// types at the name (such as TXT) are left alone.
 func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error {
 	target := tunnelTarget(tunnelID)
 
@@ -115,8 +152,8 @@ func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, host
 	if err != nil {
 		return fmt.Errorf("failed to list DNS records for %q: %w", hostname, err)
 	}
-	if len(existing) > 0 {
-		return checkExistingRecord(existing[0], hostname, tunnelID)
+	if rec, ok := selectCNAME(existing, tunnelID); ok {
+		return checkExistingRecord(rec, hostname, tunnelID)
 	}
 
 	_, err = c.api.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(zoneID), cloudflare.CreateDNSRecordParams{

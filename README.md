@@ -107,7 +107,7 @@ Early `v1alpha1`.
 | `--leader-elect` | Enable when running more than one replica. |
 | `--health-probe-bind-address` | `/healthz` and `/readyz` (default `:8081`). |
 | `--metrics-bind-address` | Prometheus metrics; `0` (default) disables them. |
-| `--dry-run` | Use an in-memory fake instead of the Cloudflare API. Nothing is provisioned in Cloudflare; the connector Deployment is still created in the cluster. Local development only. |
+| `--dry-run` | Use an in-memory fake instead of the Cloudflare API. Nothing is provisioned in Cloudflare; the connector Deployment is still created in the cluster. Local development only. Fake IDs start with `dryrun-`: a real-mode operator discards status that dry-run wrote, and a dry-run operator refuses (and will not delete) objects that hold real IDs, so the two never act on each other's state. |
 | `--zap-devel`, `--zap-log-level` | Logging (JSON by default). |
 
 ### Deploy

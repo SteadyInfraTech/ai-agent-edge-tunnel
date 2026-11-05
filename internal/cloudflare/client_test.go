@@ -28,6 +28,37 @@ func TestCheckExistingRecord(t *testing.T) {
 	assert.Error(t, checkExistingRecord(rec("A", target, &yes), "h.example.com", "t1"), "wrong type")
 }
 
+func TestSelectCNAMEIgnoresOtherRecordTypesAndOrder(t *testing.T) {
+	yes := true
+	txt := cloudflare.DNSRecord{Type: "TXT", Content: "v=spf1 -all"}
+	good := cloudflare.DNSRecord{Type: "CNAME", Content: tunnelTarget("t1"), Proxied: &yes}
+	foreign := cloudflare.DNSRecord{Type: "CNAME", Content: tunnelTarget("other"), Proxied: &yes}
+
+	// The TXT record listed first must not hide the valid CNAME.
+	rec, ok := selectCNAME([]cloudflare.DNSRecord{txt, good}, "t1")
+	require.True(t, ok)
+	assert.Equal(t, good.Content, rec.Content)
+	assert.NoError(t, checkExistingRecord(rec, "h.example.com", "t1"))
+
+	// A CNAME for this tunnel wins over one for another tunnel, in either order.
+	for _, recs := range [][]cloudflare.DNSRecord{{foreign, good}, {good, foreign}} {
+		rec, ok := selectCNAME(recs, "t1")
+		require.True(t, ok)
+		assert.Equal(t, good.Content, rec.Content)
+	}
+
+	// Only a foreign CNAME: reported, so it is rejected rather than overwritten.
+	rec, ok = selectCNAME([]cloudflare.DNSRecord{txt, foreign}, "t1")
+	require.True(t, ok)
+	assert.Error(t, checkExistingRecord(rec, "h.example.com", "t1"))
+
+	// Only a TXT record: no CNAME yet, so one can be created beside it.
+	_, ok = selectCNAME([]cloudflare.DNSRecord{txt}, "t1")
+	assert.False(t, ok)
+	_, ok = selectCNAME(nil, "t1")
+	assert.False(t, ok)
+}
+
 func TestIsNotFound(t *testing.T) {
 	notFound := cloudflare.NewNotFoundError(&cloudflare.Error{StatusCode: 404, Type: cloudflare.ErrorTypeNotFound})
 	serverErr := cloudflare.NewServiceError(&cloudflare.Error{StatusCode: 500, Type: cloudflare.ErrorTypeService})

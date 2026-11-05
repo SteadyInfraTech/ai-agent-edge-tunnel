@@ -59,10 +59,14 @@ type AgentEdgeTunnelReconciler struct {
 	BaseDomain string
 	// ConnectorImage is the cloudflared image. Pin a version or digest.
 	ConnectorImage string
+	// DryRun is true when CloudflareClient is the in-memory fake. It keeps
+	// dry-run and real state apart: see reconcileMode.
+	DryRun bool
 	// Now is overridable for tests.
 	Now func() time.Time
 }
 
+// now returns the current time, or the test clock when one is set.
 func (r *AgentEdgeTunnelReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
@@ -70,16 +74,24 @@ func (r *AgentEdgeTunnelReconciler) now() time.Time {
 	return time.Now()
 }
 
+// Reconcile drives one AgentEdgeTunnel towards its desired state: it provisions
+// the Cloudflare resources, enforces the TTL, and cleans up on deletion.
+//
 // +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;delete
-
 func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var tunnel agentopsv1alpha1.AgentEdgeTunnel
 	if err := r.Get(ctx, req.NamespacedName, &tunnel); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Before anything acts on the recorded IDs, make sure they belong to the mode
+	// this operator is running in.
+	if res, done, err := r.reconcileMode(ctx, &tunnel); done {
+		return res, err
 	}
 
 	if !tunnel.DeletionTimestamp.IsZero() {
@@ -106,6 +118,62 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return r.provision(ctx, &tunnel)
 }
 
+// recordedIDs returns the Cloudflare IDs recorded in t's status.
+func recordedIDs(t *agentopsv1alpha1.AgentEdgeTunnel) []string {
+	var ids []string
+	for _, id := range []string{t.Status.TunnelID, t.Status.AccessAppID} {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// reconcileMode keeps --dry-run and real state from contaminating each other
+// on a shared cluster. Fake IDs carry cloudflare.DryRunIDPrefix.
+//
+//   - A real-mode operator that finds IDs written by dry-run forgets them, so the
+//     object is provisioned for real instead of staying "Active" with nothing
+//     behind it. It never tries to delete a fake ID.
+//   - A dry-run operator that finds IDs of real resources refuses to touch the
+//     object. Deleting it would "succeed" against the fake without removing
+//     anything, and the finalizer would then be dropped, orphaning the real
+//     tunnel. The error keeps the finalizer in place.
+//
+// done reports that Reconcile must return res and err as they are.
+func (r *AgentEdgeTunnelReconciler) reconcileMode(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (res ctrl.Result, done bool, err error) {
+	var fakeState, realState bool
+	for _, id := range recordedIDs(t) {
+		if cf.IsDryRunID(id) {
+			fakeState = true
+		} else {
+			realState = true
+		}
+	}
+
+	switch {
+	case r.DryRun && realState:
+		msg := "provisioned against real Cloudflare; dry-run will not modify or delete it (restart without --dry-run)"
+		if t.Status.Message != msg && t.DeletionTimestamp.IsZero() {
+			t.Status.Message = msg
+			if uerr := r.Status().Update(ctx, t); uerr != nil {
+				log.FromContext(ctx).Error(uerr, "Failed to record dry-run refusal in status")
+			}
+		}
+		return ctrl.Result{}, true, errors.New(msg)
+	case !r.DryRun && fakeState:
+		log.FromContext(ctx).Info("Discarding status written by --dry-run", "name", t.Name)
+		t.Status = agentopsv1alpha1.AgentEdgeTunnelStatus{}
+		if err := r.Status().Update(ctx, t); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{Requeue: true}, true, nil
+	}
+	return ctrl.Result{}, false, nil
+}
+
+// reconcileDelete removes the Cloudflare resources and then releases the
+// finalizer. The finalizer is kept whenever cleanup fails.
 func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(t, FinalizerName) {
 		return ctrl.Result{}, nil
@@ -513,8 +581,13 @@ func statusMessage(t *agentopsv1alpha1.AgentEdgeTunnel, connectorReady bool) str
 // --- helpers ----------------------------------------------------------------
 
 // validate checks the spec and returns the parsed TTL. Spec errors are not
-// retried.
+// retried. The CRD enforces the same rules; checking here as well covers an
+// out-of-date CRD, so an invalid object can never cause a tunnel, an Access
+// application or a connector to be created.
 func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
+	if t.Spec.Cloudflare.ZoneID == "" || t.Spec.Cloudflare.Subdomain == "" {
+		return 0, errors.New("spec.cloudflare.zoneID and spec.cloudflare.subdomain are required")
+	}
 	ttl, err := parseTTL(t.Spec.TTL)
 	if err != nil {
 		return 0, err
@@ -548,6 +621,7 @@ func tunnelName(t *agentopsv1alpha1.AgentEdgeTunnel) string {
 	return name
 }
 
+// parseTTL parses a TTL such as "2h". Empty means no expiry (zero).
 func parseTTL(s string) (time.Duration, error) {
 	if s == "" {
 		return 0, nil
@@ -566,6 +640,7 @@ func boolPtr(b bool) *bool    { return &b }
 func int32Ptr(i int32) *int32 { return &i }
 func int64Ptr(i int64) *int64 { return &i }
 
+// SetupWithManager registers the reconciler with mgr.
 func (r *AgentEdgeTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentopsv1alpha1.AgentEdgeTunnel{}).
