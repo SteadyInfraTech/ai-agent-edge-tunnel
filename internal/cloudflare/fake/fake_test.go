@@ -43,3 +43,16 @@ func TestFakeAccessApplicationLifecycle(t *testing.T) {
 	require.NoError(t, c.DeleteAccessApplication(ctx, "acct", id))
 	assert.Empty(t, c.AccessApps)
 }
+
+func TestFakeRejectsHostnameOwnedByAnotherTunnel(t *testing.T) {
+	c := New()
+	ctx := context.Background()
+
+	require.NoError(t, c.CreateDNSRecord(ctx, "zone", "a.example.com", "tunnel-1"))
+	// Same tunnel again: idempotent.
+	require.NoError(t, c.CreateDNSRecord(ctx, "zone", "a.example.com", "tunnel-1"))
+
+	err := c.CreateDNSRecord(ctx, "zone", "a.example.com", "tunnel-2")
+	require.Error(t, err)
+	assert.Equal(t, "tunnel-1", c.DNSRecords["a.example.com"], "the first owner must be kept")
+}
