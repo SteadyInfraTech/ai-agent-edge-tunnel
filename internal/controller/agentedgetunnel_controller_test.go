@@ -528,7 +528,7 @@ func TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
 		cr.Finalizers = []string{FinalizerName}
 		cr.Status = agentopsv1alpha1.AgentEdgeTunnelStatus{
-			Phase: agentopsv1alpha1.PhaseActive, TunnelID: "6f1c2b3a-real", Hostname: testHostname,
+			Phase: agentopsv1alpha1.PhaseActive, TunnelID: "6f1c2b3a-real", Hostname: "agent-job-001.agents.example.com",
 		}
 	})
 
