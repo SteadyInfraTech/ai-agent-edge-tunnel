@@ -87,6 +87,7 @@ type AgentEdgeTunnelList struct {
 	Items           []AgentEdgeTunnel `json:"items"`
 }
 
+// init registers the API types with the scheme builder.
 func init() {
 	SchemeBuilder.Register(&AgentEdgeTunnel{}, &AgentEdgeTunnelList{})
 }

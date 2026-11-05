@@ -76,10 +76,12 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel)) *h
 	return h
 }
 
+// reconcile runs one reconcile pass for the harness object.
 func (h *harness) reconcile() (ctrl.Result, error) {
 	return h.r.Reconcile(context.Background(), h.req)
 }
 
+// get returns the current stored copy of the harness object.
 func (h *harness) get() agentopsv1alpha1.AgentEdgeTunnel {
 	h.t.Helper()
 	var got agentopsv1alpha1.AgentEdgeTunnel
@@ -314,7 +316,7 @@ func (w *flakyStatusWriter) Update(ctx context.Context, obj client.Object, opts 
 	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
-func TestStatusWriteFailureDeletesTunnelOnlyWhenIDWasNotStored(t *testing.T) {
+func TestAmbiguousStatusWriteKeepsTheTunnel(t *testing.T) {
 	for name, stored := range map[string]bool{"write lost": false, "write applied despite error": true} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, nil)
@@ -323,16 +325,18 @@ func TestStatusWriteFailureDeletesTunnelOnlyWhenIDWasNotStored(t *testing.T) {
 			_, err := h.reconcile()
 			require.Error(t, err)
 
+			// Whether or not the write landed, deleting the tunnel could leave a
+			// stored ID that names a tunnel that no longer exists.
+			assert.Len(t, h.cf.Tunnels, 1)
 			if stored {
-				assert.Len(t, h.cf.Tunnels, 1, "the stored ID must keep pointing at a live tunnel")
 				assert.NotEmpty(t, h.get().Status.TunnelID)
 				_, err = h.reconcile()
 				require.NoError(t, err)
 				assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
 				assert.Equal(t, 1, h.cf.CreateTunnelCalls, "the retry must reuse the stored tunnel")
-			} else {
-				assert.Empty(t, h.cf.Tunnels, "an unrecorded tunnel must not leak")
-				assert.Empty(t, h.get().Status.TunnelID)
+				for id := range h.cf.Tunnels {
+					assert.Equal(t, id, h.get().Status.TunnelID, "status must name a live tunnel")
+				}
 			}
 		})
 	}

@@ -47,6 +47,8 @@ type RealCloudflareClient struct {
 	api       *cloudflare.API
 }
 
+// NewRealCloudflareClient returns a client that talks to the Cloudflare API
+// with the given account ID and API token.
 func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient, error) {
 	api, err := cloudflare.NewWithAPIToken(apiToken)
 	if err != nil {
@@ -59,6 +61,8 @@ func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient,
 	}, nil
 }
 
+// CreateTunnel creates a locally managed tunnel and returns its ID, credentials
+// and token. Cloudflare returns the secret only once.
 func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
 	// Generate a cryptographically secure 32-byte secret and base64-encode it
 	secretBytes := make([]byte, 32)
@@ -160,6 +164,8 @@ func (c *RealCloudflareClient) CreateDNSRecord(ctx context.Context, zoneID, host
 	return nil
 }
 
+// CreateAccessPolicy creates an Access application for domain with an allow
+// policy for allowedEmails.
 func (c *RealCloudflareClient) CreateAccessPolicy(ctx context.Context, accountID, name, domain string, allowedEmails []string) error {
 	app, err := c.api.CreateAccessApplication(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.CreateAccessApplicationParams{
 		Name:   name,
@@ -237,6 +243,7 @@ func (c *RealCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, host
 	return errors.Join(errs...)
 }
 
+// DeleteAccessPolicy deletes the Access application for domain.
 func (c *RealCloudflareClient) DeleteAccessPolicy(ctx context.Context, accountID, domain string) error {
 	apps, _, err := c.api.ListAccessApplications(ctx, cloudflare.AccountIdentifier(accountID), cloudflare.ListAccessApplicationsParams{})
 	if err != nil {
