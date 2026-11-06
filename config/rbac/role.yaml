@@ -3,13 +3,13 @@ kind: ClusterRole
 metadata:
   name: edge-tunnel-manager-role
 rules:
-- apiGroups: [agentops.io]
+- apiGroups: [edge.steadyinfra.com]
   resources: [agentedgetunnels]
   verbs: [get, list, watch, update, patch]
-- apiGroups: [agentops.io]
+- apiGroups: [edge.steadyinfra.com]
   resources: [agentedgetunnels/status]
   verbs: [get, update, patch]
-- apiGroups: [agentops.io]
+- apiGroups: [edge.steadyinfra.com]
   resources: [agentedgetunnels/finalizers]
   verbs: [update]
 - apiGroups: [apps]
