@@ -38,6 +38,37 @@ sample-agent-tunnel   Active   agent-job-8f92.agents.acme.dev   true        2026
 `Active` means the tunnel and DNS record exist, plus the Access policy for email-protected objects; `CONNECTED` is whether the cloudflared pod
 has connected to Cloudflare's edge.
 
+## Exposing an AgentSession
+
+Instead of a fixed `spec.service`, a tunnel can follow an `AgentSession` from
+[agentops-operator](https://github.com/SteadyInfraTech/agentops-operator):
+
+```yaml
+spec:
+  sessionRef: { name: support-session-8f92 }   # same namespace; mutually exclusive with service
+```
+
+The session's `status.phase` and `status.endpoint` are the whole contract; the session is read as
+unstructured, so this operator does not depend on agentops-operator and starts without it installed.
+
+- **Waiting.** Until the session is `Bound` (or if it does not exist yet), nothing is created in
+  Cloudflare and the tunnel stays `Pending`. Create the two objects in either order.
+- **Pinning.** When the session is first seen `Bound`, its UID and endpoint are recorded in status
+  before anything is created. A session deleted and recreated under the same name has a different UID
+  and does not inherit the tunnel or its Access policy.
+- **Ending.** The tunnel is removed and ends `Terminated` when the session is `Completed`, `Expired` or
+  `Failed`, is deleted or replaced, or is bound to a different endpoint. Extending a session's duration
+  needs no action here, because the session's phase decides. `spec.ttl` is only an optional hard cap.
+- **Target.** Only an endpoint of the form `http://<service>.<this namespace>.svc:<port>` is accepted;
+  anything else (another namespace, another host, https, a path) is refused and nothing is created.
+- **Latency.** The session is polled every 10 seconds, so a tunnel can outlive its session by up to that long.
+- **Isolation.** The tunnel exposes the agent's Service, not one session. Access decides who can reach it,
+  not which session they may use; see the design note for what that means for multi-session agents.
+- **Clients** must wait for `status.phase: Active` and `status.connectorReady: true`, keep watching
+  through `Failed` (transient errors retry), and treat only `Terminated` as final.
+- **RBAC.** The operator needs `get` on `agentsessions` (`agents.steadyinfra.com`) in the namespaces it manages;
+  both install options grant it.
+
 ## Security model
 
 - **Never public by omission.** Set `security.allowedEmails`, or opt in with `security.allowPublic: true`

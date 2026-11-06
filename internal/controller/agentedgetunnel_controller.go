@@ -81,6 +81,7 @@ func (r *AgentEdgeTunnelReconciler) now() time.Time {
 // +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=agents.steadyinfra.com,resources=agentsessions,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;delete
 func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -112,6 +113,10 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.patchFinalizers(ctx, &tunnel, orig); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if res, done, err := r.reconcileSession(ctx, &tunnel); done {
+		return res, err
 	}
 
 	if tunnel.Status.Phase == agentopsv1alpha1.PhaseActive {
@@ -207,17 +212,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 	now := r.now()
 	if t.Status.ExpiresAt != nil && !now.Before(t.Status.ExpiresAt.Time) {
 		log.FromContext(ctx).Info("AgentEdgeTunnel reached TTL; removing Cloudflare resources", "name", t.Name)
-		// Only mark Terminated after cleanup succeeded; otherwise stay Active
-		// and retry.
-		if err := r.cleanup(ctx, t); err != nil {
-			return ctrl.Result{}, fmt.Errorf("cleaning up expired tunnel: %w", err)
-		}
-		t.Status.Phase = agentopsv1alpha1.PhaseTerminated
-		t.Status.Message = "TTL expired; Cloudflare resources removed"
-		t.Status.TunnelID = ""
-		t.Status.AccessAppID = ""
-		t.Status.ConnectorReady = false
-		return ctrl.Result{}, r.Status().Update(ctx, t)
+		return ctrl.Result{}, r.terminate(ctx, t, "TTL expired; Cloudflare resources removed")
 	}
 
 	// An object that became Active without an Access application (for example
@@ -256,10 +251,28 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 			wait = until
 		}
 	}
+	if t.Spec.SessionRef != nil && wait > sessionPollInterval {
+		wait = sessionPollInterval
+	}
 	if wait < time.Second {
 		wait = time.Second
 	}
 	return ctrl.Result{RequeueAfter: wait}, nil
+}
+
+// terminate removes the Cloudflare resources and the connector, then marks the
+// object Terminated, which is final. It is marked only after cleanup succeeded;
+// otherwise the object keeps its phase and the caller retries.
+func (r *AgentEdgeTunnelReconciler) terminate(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, message string) error {
+	if err := r.cleanup(ctx, t); err != nil {
+		return fmt.Errorf("cleaning up: %w", err)
+	}
+	t.Status.Phase = agentopsv1alpha1.PhaseTerminated
+	t.Status.Message = message
+	t.Status.TunnelID = ""
+	t.Status.AccessAppID = ""
+	t.Status.ConnectorReady = false
+	return r.Status().Update(ctx, t)
 }
 
 // provision drives Pending/Failed objects to Active. Every step is safe to
@@ -345,6 +358,9 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	}
 
 	logger.Info("AgentEdgeTunnel is active", "hostname", t.Status.Hostname, "connectorReady", ready)
+	if t.Spec.SessionRef != nil {
+		return ctrl.Result{RequeueAfter: sessionPollInterval}, nil
+	}
 	return ctrl.Result{RequeueAfter: maxRequeue}, nil
 }
 
@@ -363,7 +379,7 @@ func (r *AgentEdgeTunnelReconciler) fail(ctx context.Context, t *agentopsv1alpha
 // by an object this tunnel does not own. writeConnectorSecret checks again,
 // which covers a Secret created in between.
 func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
-	if t.Spec.Service == nil {
+	if !hasConnector(t) {
 		return nil
 	}
 	var s corev1.Secret
@@ -466,8 +482,12 @@ ingress:
 // It overwrites a Secret this tunnel already owns (left by an earlier failed
 // attempt) and refuses to touch one it does not own.
 func (r *AgentEdgeTunnelReconciler) writeConnectorSecret(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, info *cf.TunnelInfo, hostname string) error {
-	if t.Spec.Service == nil {
+	if !hasConnector(t) {
 		return nil
+	}
+	svc, err := target(t)
+	if err != nil {
+		return err
 	}
 	creds, err := json.Marshal(struct {
 		AccountTag   string
@@ -487,7 +507,7 @@ func (r *AgentEdgeTunnelReconciler) writeConnectorSecret(ctx context.Context, t 
 		secret.Type = corev1.SecretTypeOpaque
 		secret.Data = map[string][]byte{
 			credentialsKey: creds,
-			configKey:      []byte(connectorConfig(info.ID, hostname, t.Spec.Service, t.Namespace)),
+			configKey:      []byte(connectorConfig(info.ID, hostname, svc, t.Namespace)),
 		}
 		return controllerutil.SetControllerReference(t, secret, r.Scheme)
 	})
@@ -497,7 +517,7 @@ func (r *AgentEdgeTunnelReconciler) writeConnectorSecret(ctx context.Context, t 
 // ensureConnector keeps the cloudflared Deployment in its desired state and
 // reports whether it is connected. With no spec.service there is nothing to run.
 func (r *AgentEdgeTunnelReconciler) ensureConnector(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (bool, error) {
-	if t.Spec.Service == nil {
+	if !hasConnector(t) {
 		return false, nil
 	}
 
@@ -602,7 +622,7 @@ func (r *AgentEdgeTunnelReconciler) mutateConnector(dep *appsv1.Deployment, t *a
 // deleteConnector removes the connector Deployment and Secret, but only if
 // this tunnel owns them.
 func (r *AgentEdgeTunnelReconciler) deleteConnector(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
-	if t.Spec.Service == nil {
+	if !hasConnector(t) {
 		return nil
 	}
 	meta := metav1.ObjectMeta{Name: connectorName(t), Namespace: t.Namespace}
@@ -629,8 +649,8 @@ func (r *AgentEdgeTunnelReconciler) deleteConnector(ctx context.Context, t *agen
 // statusMessage explains why an Active tunnel is not yet fully usable.
 func statusMessage(t *agentopsv1alpha1.AgentEdgeTunnel, connectorReady bool) string {
 	switch {
-	case t.Spec.Service == nil:
-		return "no spec.service: the tunnel exists but is not connected to any workload"
+	case !hasConnector(t):
+		return "no spec.service or spec.sessionRef: the tunnel exists but is not connected to any workload"
 	case !connectorReady:
 		return "waiting for the cloudflared connector to connect"
 	}
@@ -658,11 +678,19 @@ func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
 	}
 	// connectorConfig interpolates these into YAML, so they are checked here
 	// even though the CRD checks them too.
-	if svc := t.Spec.Service; svc != nil {
-		// The name becomes a label value on the connector pods.
-		if len(t.Name) > validation.LabelValueMaxLength {
-			return 0, fmt.Errorf("metadata.name must be at most %d characters when spec.service is set", validation.LabelValueMaxLength)
+	if t.Spec.Service != nil && t.Spec.SessionRef != nil {
+		return 0, errors.New("spec.service and spec.sessionRef are mutually exclusive")
+	}
+	if ref := t.Spec.SessionRef; ref != nil {
+		if errs := validation.IsDNS1123Subdomain(ref.Name); len(errs) > 0 {
+			return 0, fmt.Errorf("spec.sessionRef.name is invalid: %s", strings.Join(errs, "; "))
 		}
+	}
+	if hasConnector(t) && len(t.Name) > validation.LabelValueMaxLength {
+		// The name becomes a label value on the connector pods.
+		return 0, fmt.Errorf("metadata.name must be at most %d characters when a connector is created", validation.LabelValueMaxLength)
+	}
+	if svc := t.Spec.Service; svc != nil {
 		if errs := validation.IsDNS1035Label(svc.Name); len(errs) > 0 {
 			return 0, fmt.Errorf("spec.service.name is invalid: %s", strings.Join(errs, "; "))
 		}

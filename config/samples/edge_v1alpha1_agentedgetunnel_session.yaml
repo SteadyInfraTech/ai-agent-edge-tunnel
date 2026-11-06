@@ -1,0 +1,19 @@
+# Expose the agent an AgentSession (agents.steadyinfra.com) is bound to.
+# Create this alongside the session; order does not matter. The tunnel waits
+# until the session is Bound and is removed when the session ends.
+# Clients wait for status.phase: Active and status.connectorReady: true.
+apiVersion: edge.steadyinfra.com/v1alpha1
+kind: AgentEdgeTunnel
+metadata:
+  name: session-8f92
+  # Set an ownerReference to the AgentSession (with its uid) when you create
+  # this, so deleting the session deletes the tunnel as well.
+spec:
+  sessionRef:
+    name: support-session-8f92
+  cloudflare:
+    zoneID: "<your zone id>"
+    subdomain: agent-8f92
+  security:
+    allowedEmails: ["user@example.com"]
+  # ttl is optional: with sessionRef it is only a hard upper bound.

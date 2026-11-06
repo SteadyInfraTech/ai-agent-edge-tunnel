@@ -45,6 +45,16 @@ spec:
             (has(self.spec.service) == has(oldSelf.spec.service) &&
             (!has(self.spec.service) || self.spec.service == oldSelf.spec.service))
           message: spec.service cannot change once the tunnel exists; delete and recreate the AgentEdgeTunnel
+        - rule: '!(has(self.spec.service) && has(self.spec.sessionRef))'
+          message: spec.service and spec.sessionRef are mutually exclusive
+        # Adding sessionRef to a tunnel that already exists would skip the step
+        # that stores the connector credentials, which Cloudflare returns once.
+        - rule: >-
+            !has(oldSelf.status) ||
+            (!has(oldSelf.status.tunnelID) && !has(oldSelf.status.sessionUID)) ||
+            (has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) &&
+            (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef))
+          message: spec.sessionRef cannot change once the tunnel exists; delete and recreate the AgentEdgeTunnel
         - rule: >-
             !has(oldSelf.status) || !has(oldSelf.status.tunnelID) ||
             (has(self.spec.security) == has(oldSelf.spec.security) &&
@@ -83,6 +93,19 @@ spec:
                     format: int32
                     minimum: 1
                     maximum: 65535
+              sessionRef:
+                description: >-
+                  AgentSession (agents.steadyinfra.com) in this namespace whose
+                  bound agent the tunnel exposes. Mutually exclusive with service.
+                  Nothing is created in Cloudflare until the session is Bound; the
+                  tunnel is removed when the session ends or is replaced.
+                type: object
+                required: [name]
+                properties:
+                  name:
+                    type: string
+                    minLength: 1
+                    maxLength: 253
               cloudflare:
                 type: object
                 required:
@@ -159,6 +182,10 @@ spec:
               message:
                 type: string
               accessAppID:
+                type: string
+              sessionUID:
+                type: string
+              sessionEndpoint:
                 type: string
               connectorReady:
                 type: boolean

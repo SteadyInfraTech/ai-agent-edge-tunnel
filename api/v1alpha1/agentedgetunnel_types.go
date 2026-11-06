@@ -24,6 +24,13 @@ type ServiceTarget struct {
 	Port int32 `json:"port"`
 }
 
+// SessionReference names an AgentSession (group agents.steadyinfra.com) in the
+// same namespace as the AgentEdgeTunnel.
+type SessionReference struct {
+	// Name of the AgentSession.
+	Name string `json:"name"`
+}
+
 // SecurityConfig defines Zero Trust Access and edge validation rules.
 // A tunnel must be protected or explicitly public: set AllowedEmails, or set
 // AllowPublic to opt in to an unauthenticated hostname.
@@ -49,10 +56,17 @@ type AgentEdgeTunnelSpec struct {
 	// cloudflared connector for the tunnel. When unset, the tunnel and DNS
 	// record are created but nothing is connected to them. It cannot be added
 	// or removed after creation.
-	Service    *ServiceTarget   `json:"service,omitempty"`
-	Cloudflare CloudflareConfig `json:"cloudflare"`
+	Service *ServiceTarget `json:"service,omitempty"`
+	// SessionRef exposes the agent an AgentSession is bound to, instead of a
+	// fixed Service. It is mutually exclusive with Service. Nothing is created
+	// in Cloudflare until the session is Bound, and the tunnel is removed when
+	// the session ends or is replaced. It cannot change once the session is
+	// bound.
+	SessionRef *SessionReference `json:"sessionRef,omitempty"`
+	Cloudflare CloudflareConfig  `json:"cloudflare"`
 	// TTL is a Go duration such as "2h". The clock starts when the tunnel
-	// becomes Active. Empty means no expiry.
+	// becomes Active. Empty means no expiry. With SessionRef it is only a hard
+	// upper bound: the session's phase ends the tunnel first.
 	TTL string `json:"ttl,omitempty"`
 	// CleanupOnFinish is reserved: it is accepted but not acted on yet.
 	CleanupOnFinish bool           `json:"cleanupOnFinish"`
@@ -87,8 +101,15 @@ type AgentEdgeTunnelStatus struct {
 	// It is recorded as soon as it exists, for the same reason as TunnelID.
 	AccessAppID string `json:"accessAppID,omitempty"`
 	// ConnectorReady is true when the cloudflared pod is connected to Cloudflare.
-	ConnectorReady bool         `json:"connectorReady,omitempty"`
-	ExpiresAt      *metav1.Time `json:"expiresAt,omitempty"`
+	ConnectorReady bool `json:"connectorReady,omitempty"`
+	// SessionUID is the UID of the AgentSession the tunnel was bound to,
+	// recorded before anything is created. A session with the same name but a
+	// different UID is a different session and ends the tunnel.
+	SessionUID string `json:"sessionUID,omitempty"`
+	// SessionEndpoint is the session's endpoint at the time of binding. A
+	// session bound to a different endpoint later ends the tunnel.
+	SessionEndpoint string       `json:"sessionEndpoint,omitempty"`
+	ExpiresAt       *metav1.Time `json:"expiresAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -96,6 +117,7 @@ type AgentEdgeTunnelStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Hostname",type=string,JSONPath=`.status.hostname`
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.phase) || self.status.phase != 'Active' || (has(self.spec.ttl) ? self.spec.ttl : '') == (has(oldSelf.spec.ttl) ? oldSelf.spec.ttl : '')",message="spec.ttl cannot change while the tunnel is Active; delete and recreate the object to change it"
+// +kubebuilder:validation:XValidation:rule="!(has(self.spec.service) && has(self.spec.sessionRef))",message="spec.service and spec.sessionRef are mutually exclusive"
 // +kubebuilder:printcolumn:name="Connected",type=boolean,JSONPath=`.status.connectorReady`
 // +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.status.expiresAt`
 
