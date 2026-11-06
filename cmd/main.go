@@ -75,6 +75,11 @@ func main() {
 		cfClient = realClient
 	}
 
+	if err := validateBaseDomain(baseDomain); err != nil {
+		setupLog.Error(err, "invalid --base-domain / EDGE_BASE_DOMAIN")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 	})
