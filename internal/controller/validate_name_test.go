@@ -25,3 +25,18 @@ func TestLongNameWithServiceFailsBeforeCreatingAnything(t *testing.T) {
 	assert.Zero(t, h.cf.CreateAccessCalls)
 	assert.Empty(t, h.cf.DNSRecords)
 }
+
+// TestInvalidSubdomainFailsBeforeCreatingAnything checks: only a single DNS
+// label is accepted as spec.cloudflare.subdomain.
+func TestInvalidSubdomainFailsBeforeCreatingAnything(t *testing.T) {
+	for _, sub := range []string{"a.b", "Upper", "-lead", "has space", strings.Repeat("a", 64)} {
+		t.Run(sub, func(t *testing.T) {
+			h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.Cloudflare.Subdomain = sub })
+
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+			assert.Zero(t, h.cf.CreateTunnelCalls)
+		})
+	}
+}

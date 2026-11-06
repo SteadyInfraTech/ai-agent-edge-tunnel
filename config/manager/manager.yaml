@@ -34,6 +34,8 @@ spec:
         #   kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
         #     --from-literal=EDGE_BASE_DOMAIN=agents.example.com \
         #     --from-literal=CONNECTOR_IMAGE=cloudflare/cloudflared:2026.x.y
+        # The values are read at startup: after changing the ConfigMap, run
+        #   kubectl -n edge-tunnel-system rollout restart deployment/edge-tunnel-controller-manager
         envFrom:
         - configMapRef: {name: edge-tunnel-config, optional: true}
         env:

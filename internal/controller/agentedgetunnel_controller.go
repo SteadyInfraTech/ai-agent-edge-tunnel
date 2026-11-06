@@ -636,6 +636,11 @@ func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
 	if t.Spec.Cloudflare.ZoneID == "" || t.Spec.Cloudflare.Subdomain == "" {
 		return 0, errors.New("spec.cloudflare.zoneID and spec.cloudflare.subdomain are required")
 	}
+	// The hostname and the connector config are built from this, so it must be
+	// a single DNS label; the CRD checks the same pattern.
+	if errs := validation.IsDNS1123Label(t.Spec.Cloudflare.Subdomain); len(errs) > 0 {
+		return 0, fmt.Errorf("spec.cloudflare.subdomain must be a single DNS label: %s", strings.Join(errs, "; "))
+	}
 	ttl, err := parseTTL(t.Spec.TTL)
 	if err != nil {
 		return 0, err
