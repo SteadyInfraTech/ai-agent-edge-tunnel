@@ -132,7 +132,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		Cache:                  cache.Options{DefaultNamespaces: namespaceConfig(watchNS)},
 		LeaderElection:         leaderElect,
-		LeaderElectionID:       "edge-tunnel.agentops.io",
+		LeaderElectionID:       "edge-tunnel.steadyinfra.com",
 		// Secrets are read straight from the API server. Caching them would
 		// start a cluster-wide Secret informer, which needs list and watch on
 		// all Secrets; the operator's RBAC deliberately grants neither.

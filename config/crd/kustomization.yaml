@@ -1,2 +1,2 @@
 resources:
-- bases/agentops.io_agentedgetunnels.yaml
+- bases/edge.steadyinfra.com_agentedgetunnels.yaml

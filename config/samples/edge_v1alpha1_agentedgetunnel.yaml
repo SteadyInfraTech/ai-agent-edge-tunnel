@@ -1,4 +1,4 @@
-apiVersion: agentops.io/v1alpha1
+apiVersion: edge.steadyinfra.com/v1alpha1
 kind: AgentEdgeTunnel
 metadata:
   name: sample-agent-tunnel

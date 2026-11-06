@@ -27,7 +27,7 @@ import (
 const (
 	// FinalizerName blocks deletion of an AgentEdgeTunnel until its Cloudflare
 	// resources are gone.
-	FinalizerName = "agentops.io/edge-tunnel-cleanup"
+	FinalizerName = "edge.steadyinfra.com/tunnel-cleanup"
 
 	// maxRequeue bounds how long an Active tunnel waits between checks.
 	maxRequeue = 30 * time.Second
@@ -78,9 +78,9 @@ func (r *AgentEdgeTunnelReconciler) now() time.Time {
 // Reconcile drives one AgentEdgeTunnel towards its desired state: it provisions
 // the Cloudflare resources, enforces the TTL, and cleans up on deletion.
 //
-// +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agentops.io,resources=agentedgetunnels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;delete
 func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

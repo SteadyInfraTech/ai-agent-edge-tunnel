@@ -5,7 +5,7 @@
 ## How it works
 
 ```yaml
-apiVersion: agentops.io/v1alpha1
+apiVersion: edge.steadyinfra.com/v1alpha1
 kind: AgentEdgeTunnel
 metadata:
   name: sample-agent-tunnel
@@ -123,7 +123,7 @@ kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
   --from-literal=CONNECTOR_IMAGE=<pinned cloudflared image>
 make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
 make deploy IMG=<your-registry>/ai-agent-edge-tunnel:<tag>        # needs the kustomize CLI
-kubectl apply -f config/samples/agentops_v1alpha1_agentedgetunnel.yaml
+kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml
 ```
 
 #### Namespace-scoped install
