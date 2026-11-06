@@ -358,6 +358,9 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	}
 
 	logger.Info("AgentEdgeTunnel is active", "hostname", t.Status.Hostname, "connectorReady", ready)
+	if t.Spec.SessionRef != nil {
+		return ctrl.Result{RequeueAfter: sessionPollInterval}, nil
+	}
 	return ctrl.Result{RequeueAfter: maxRequeue}, nil
 }
 

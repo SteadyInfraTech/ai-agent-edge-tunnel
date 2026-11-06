@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,4 +220,35 @@ func TestDeletingASessionTunnelRemovesTheConnector(t *testing.T) {
 
 	assert.Empty(t, h.cf.Tunnels)
 	h.assertConnectorGone()
+}
+
+// TestSessionRefEnforcesTTLWhileSessionPhaseIsUnexpected checks: a pinned
+// session in a phase that does not end the tunnel must not switch off the TTL
+// hard cap or the connector reconciliation.
+func TestSessionRefEnforcesTTLWhileSessionPhaseIsUnexpected(t *testing.T) {
+	h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+
+	setSession(t, h, func(u *unstructured.Unstructured) {
+		require.NoError(t, unstructured.SetNestedField(u.Object, "Pending", "status", "phase"))
+	})
+	h.now = h.now.Add(2 * time.Hour) // the default ttl is 1h
+	_, err = h.reconcile()
+	require.NoError(t, err)
+
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "TTL")
+	assert.Empty(t, h.cf.Tunnels)
+}
+
+// TestActiveSessionTunnelRequeuesAtThePollInterval checks: the first requeue
+// after provisioning already uses the session poll interval.
+func TestActiveSessionTunnelRequeuesAtThePollInterval(t *testing.T) {
+	h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, sessionPollInterval, res.RequeueAfter)
 }

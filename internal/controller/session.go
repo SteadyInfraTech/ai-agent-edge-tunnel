@@ -135,8 +135,11 @@ func (r *AgentEdgeTunnelReconciler) reconcileSession(ctx context.Context, t *age
 	case "Bound":
 	default:
 		if pinned {
-			// A bound session does not go back to waiting; keep what exists and look again.
-			return ctrl.Result{RequeueAfter: sessionPollInterval}, true, nil
+			// A bound session does not go back to waiting, so an unexpected
+			// phase changes nothing: fall through, so the TTL is still enforced
+			// and the connector is still kept up. Only the phases above end a
+			// tunnel.
+			return ctrl.Result{}, false, nil
 		}
 		return r.waitForSession(ctx, t, fmt.Sprintf("waiting for AgentSession %q to be Bound (it is %q)", session.GetName(), phase))
 	}

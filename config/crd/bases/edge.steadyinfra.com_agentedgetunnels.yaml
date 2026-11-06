@@ -47,10 +47,14 @@ spec:
           message: spec.service cannot change once the tunnel exists; delete and recreate the AgentEdgeTunnel
         - rule: '!(has(self.spec.service) && has(self.spec.sessionRef))'
           message: spec.service and spec.sessionRef are mutually exclusive
+        # Adding sessionRef to a tunnel that already exists would skip the step
+        # that stores the connector credentials, which Cloudflare returns once.
         - rule: >-
-            !has(oldSelf.status) || !has(oldSelf.status.sessionUID) ||
-            (has(self.spec.sessionRef) && self.spec.sessionRef == oldSelf.spec.sessionRef)
-          message: spec.sessionRef cannot change once the session is bound; delete and recreate the AgentEdgeTunnel
+            !has(oldSelf.status) ||
+            (!has(oldSelf.status.tunnelID) && !has(oldSelf.status.sessionUID)) ||
+            (has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) &&
+            (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef))
+          message: spec.sessionRef cannot change once the tunnel exists; delete and recreate the AgentEdgeTunnel
         - rule: >-
             !has(oldSelf.status) || !has(oldSelf.status.tunnelID) ||
             (has(self.spec.security) == has(oldSelf.spec.security) &&
