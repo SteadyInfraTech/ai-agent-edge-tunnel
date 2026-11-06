@@ -3,14 +3,18 @@ name: CI
 on:
   push:
     branches: [ main ]
+  # Every pull request, not just those targeting main, so stacked PRs are tested.
   pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
-
+    # No Cloudflare credentials here: unit tests must never touch the live API.
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -18,8 +22,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          check-latest: true
+          go-version-file: go.mod
           cache: true
 
       - name: Verify go.mod and go.sum are tidy
@@ -27,24 +30,67 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - name: Cache Go Dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
+      - name: Check formatting
+        run: test -z "$(gofmt -l $(git ls-files '*.go' | grep -v zz_generated))"
 
-      - name: Run Unit Tests (Mocked)
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run Unit Tests (Fake Cloudflare)
         run: go test -v -race ./...
 
-      - name: Run Live Cloudflare API Test (Optional)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
-        run: go test -v ./internal/cloudflare/... -run TestLiveCloudflareTunnel
-
       - name: Build Operator Binary
-        run: go build -o bin/manager cmd/main.go
+        run: go build -o bin/manager ./cmd
+
+      - name: Render Kubernetes manifests
+        run: kubectl kustomize config/default > /dev/null
+
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Live Cloudflare API Test
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel

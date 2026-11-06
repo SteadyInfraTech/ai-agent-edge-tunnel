@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edge-tunnel-system
+  labels:
+    # The operator creates pods only in tunnel namespaces, but its own pod
+    # should still meet the restricted profile.
+    pod-security.kubernetes.io/enforce: restricted

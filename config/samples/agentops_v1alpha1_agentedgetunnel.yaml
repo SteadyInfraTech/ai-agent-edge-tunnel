@@ -4,15 +4,17 @@ metadata:
   name: sample-agent-tunnel
   namespace: default
 spec:
-  targetPodSelector:
-    app: langgraph-worker
+  # In-namespace Service to expose. The operator runs a cloudflared connector for it.
+  service:
+    name: langgraph-worker
+    port: 8080
   cloudflare:
-    zoneID: "023e105f4ecef8ad9ca31a8372d0c353"
+    zoneID: "REPLACE_WITH_YOUR_ZONE_ID"
     subdomain: "agent-job-8f92"
   ttl: "2h"
-  cleanupOnFinish: true
   security:
+    # Only these identities can reach the hostname (Cloudflare Access).
     allowedEmails:
       - "devops@company.com"
-    webhookValidation:
-      provider: "github"
+    # To expose a hostname with no authentication (e.g. a webhook receiver),
+    # set `allowPublic: true` instead of allowedEmails. It is never the default.

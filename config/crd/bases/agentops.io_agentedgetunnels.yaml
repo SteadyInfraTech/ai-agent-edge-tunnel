@@ -14,31 +14,138 @@ spec:
   - name: v1alpha1
     served: true
     storage: true
+    # Without the status subresource, the operator's status updates fail.
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Phase
+      type: string
+      jsonPath: .status.phase
+    - name: Hostname
+      type: string
+      jsonPath: .status.hostname
+    - name: Connected
+      type: boolean
+      jsonPath: .status.connectorReady
+    - name: Expires
+      type: string
+      jsonPath: .status.expiresAt
     schema:
       openAPIV3Schema:
         type: object
+        # Without this a resource with no spec passes admission and reaches the
+        # controller with empty Cloudflare settings.
+        required:
+        - spec
+        x-kubernetes-validations:
+        # Nothing re-applies these to Cloudflare or to the connector once the
+        # tunnel exists, so a silent edit would only make the spec lie.
+        - rule: >-
+            !has(oldSelf.status) || !has(oldSelf.status.tunnelID) ||
+            (has(self.spec.service) == has(oldSelf.spec.service) &&
+            (!has(self.spec.service) || self.spec.service == oldSelf.spec.service))
+          message: spec.service cannot change once the tunnel exists; delete and recreate the AgentEdgeTunnel
+        - rule: >-
+            !has(oldSelf.status) || !has(oldSelf.status.tunnelID) ||
+            (has(self.spec.security) == has(oldSelf.spec.security) &&
+            (!has(self.spec.security) || self.spec.security == oldSelf.spec.security))
+          message: spec.security cannot change once the tunnel exists; delete and recreate the AgentEdgeTunnel
+        # expiresAt is fixed when the tunnel becomes Active and the controller
+        # never re-reads spec.ttl, so a later edit would silently do nothing.
+        - rule: "!has(self.status) || !has(self.status.phase) || self.status.phase != 'Active' || (has(self.spec.ttl) ? self.spec.ttl : '') == (has(oldSelf.spec.ttl) ? oldSelf.spec.ttl : '')"
+          message: spec.ttl cannot change while the tunnel is Active; delete and recreate the object to change it
         properties:
           spec:
             type: object
+            required:
+            - cloudflare
             properties:
               targetPodSelector:
+                description: Deprecated and ignored; use service.
                 type: object
                 additionalProperties:
                   type: string
+              service:
+                description: >-
+                  In-namespace Service the tunnel routes to. When set, the operator
+                  runs a cloudflared connector for the tunnel. When unset, the tunnel
+                  and DNS record exist but nothing is connected to them.
+                type: object
+                required: [name, port]
+                properties:
+                  name:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  port:
+                    type: integer
+                    format: int32
+                    minimum: 1
+                    maximum: 65535
               cloudflare:
                 type: object
-                properties:
-                  zoneID:
-                    type: string
-                  subdomain:
-                    type: string
                 required:
                 - zoneID
                 - subdomain
+                properties:
+                  zoneID:
+                    type: string
+                    minLength: 1
+                  subdomain:
+                    type: string
+                    # A single DNS label.
+                    pattern: '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+                x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: cloudflare settings are immutable once set
               ttl:
                 type: string
+                description: Go duration such as "2h". The clock starts when the tunnel becomes Active.
+                # Empty (no expiry), or a positive Go duration: leading fractions (.5h),
+                # a leading +, and both micro signs. Zero passes the pattern; the
+                # controller rejects it.
+                pattern: '^$|^\+?(([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$'
               cleanupOnFinish:
                 type: boolean
+                description: Reserved; accepted but not acted on yet.
+              security:
+                description: >-
+                  A tunnel is never public by omission: set allowedEmails, or
+                  allowPublic to opt in to an unauthenticated hostname.
+                type: object
+                # Reject settings the operator does not enforce yet. Silently
+                # ignoring a security setting would let a user believe a
+                # protection is active when it is not.
+                x-kubernetes-validations:
+                - rule: '!has(self.webhookValidation)'
+                  message: security.webhookValidation is not implemented yet and would not be enforced
+                - rule: '!has(self.serviceTokens) || !self.serviceTokens'
+                  message: security.serviceTokens is not implemented yet and would not be enforced
+                - rule: '!(has(self.allowPublic) && self.allowPublic && has(self.allowedEmails) && size(self.allowedEmails) > 0)'
+                  message: security.allowedEmails and security.allowPublic are mutually exclusive
+                properties:
+                  allowPublic:
+                    type: boolean
+                  allowedEmails:
+                    type: array
+                    maxItems: 50
+                    items:
+                      type: string
+                      maxLength: 254
+                  serviceTokens:
+                    description: Not implemented yet; rejected so it cannot be mistaken for an active protection.
+                    type: boolean
+                  webhookValidation:
+                    description: Not implemented yet; rejected so it cannot be mistaken for an active protection.
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                        maxLength: 253
+                      secretRef:
+                        type: string
+                        maxLength: 253
           status:
             type: object
             properties:
@@ -48,3 +155,13 @@ spec:
                 type: string
               phase:
                 type: string
+                enum: [Pending, Active, Terminated, Failed]
+              message:
+                type: string
+              accessAppID:
+                type: string
+              connectorReady:
+                type: boolean
+              expiresAt:
+                type: string
+                format: date-time
