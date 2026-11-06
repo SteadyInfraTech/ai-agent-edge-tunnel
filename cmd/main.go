@@ -4,12 +4,14 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -32,6 +34,21 @@ func init() {
 	utilruntime.Must(agentopsv1alpha1.AddToScheme(scheme))
 }
 
+// namespaceConfig turns a comma-separated list into the cache's namespace
+// restriction. An empty list returns nil, which means every namespace.
+func namespaceConfig(list string) map[string]cache.Config {
+	var out map[string]cache.Config
+	for _, ns := range strings.Split(list, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			if out == nil {
+				out = make(map[string]cache.Config)
+			}
+			out[ns] = cache.Config{}
+		}
+	}
+	return out
+}
+
 // main parses flags, builds the Cloudflare client (real, or the in-memory fake
 // with --dry-run) and runs the controller manager.
 func main() {
@@ -42,6 +59,7 @@ func main() {
 		leaderElect    bool
 		probeAddr      string
 		metricsAddr    string
+		watchNS        string
 	)
 	flag.BoolVar(&dryRun, "dry-run", false,
 		"Use an in-memory fake instead of the Cloudflare API. Nothing is provisioned in Cloudflare; for local development only.")
@@ -51,6 +69,8 @@ func main() {
 		"cloudflared image run for each tunnel with spec.service. Pin a version or digest. Env: CONNECTOR_IMAGE.")
 	flag.BoolVar(&leaderElect, "leader-elect", false,
 		"Enable leader election so only one replica reconciles. Required when running more than one replica.")
+	flag.StringVar(&watchNS, "watch-namespaces", os.Getenv("EDGE_WATCH_NAMESPACES"),
+		"Comma-separated namespaces to watch. Empty watches every namespace and needs cluster-wide RBAC; set it to run with namespaced Roles only (see config/overlays/namespaced). Env: EDGE_WATCH_NAMESPACES.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0",
 		"Address for the Prometheus metrics endpoint, e.g. :8080. \"0\" disables it. Served over plain HTTP without authentication, so restrict access with a NetworkPolicy.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address for the /healthz and /readyz endpoints.")
@@ -105,6 +125,7 @@ func main() {
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
+		Cache:                  cache.Options{DefaultNamespaces: namespaceConfig(watchNS)},
 		LeaderElection:         leaderElect,
 		LeaderElectionID:       "edge-tunnel.agentops.io",
 		// Secrets are read straight from the API server. Caching them would
@@ -141,7 +162,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting manager for ai-agent-edge-tunnel", "baseDomain", baseDomain, "connectorImage", connectorImage, "leaderElection", leaderElect)
+	setupLog.Info("Starting manager for ai-agent-edge-tunnel", "baseDomain", baseDomain, "connectorImage", connectorImage, "leaderElection", leaderElect, "watchNamespaces", watchNS)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)

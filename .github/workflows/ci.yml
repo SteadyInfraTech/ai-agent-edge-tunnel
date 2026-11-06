@@ -45,6 +45,15 @@ jobs:
       - name: Render Kubernetes manifests
         run: kubectl kustomize config/default > /dev/null
 
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+
       - name: Build container image
         run: docker build -t ai-agent-edge-tunnel:ci .
 

@@ -51,10 +51,8 @@ has connected to Cloudflare's edge.
   seccomp, no service account token.
 - **Least-privilege operator.** It can `get/create/update/delete` Secrets but not `list` or `watch` them, so it
   cannot enumerate Secrets in the cluster. Its cache is disabled for Secrets to make that work.
-  **Limit:** the ClusterRole is cluster-wide, so a compromised operator pod could still `get` a Secret in any
-  namespace if it knew the name. Kubernetes cannot scope a ClusterRole to a namespace; to narrow it, replace the
-  Secret and Deployment rules with a `Role` and `RoleBinding` in each namespace you use tunnels in. That needs a
-  namespace-restricted cache, which is not implemented yet.
+  **Limit of the default install:** its ClusterRole is cluster-wide, so a compromised operator pod could still
+  `get` a Secret in any namespace if it knew the name. For a tighter boundary use the namespaced install below.
 - **No adoption.** The operator refuses to overwrite a Secret, Deployment or DNS record it does not own.
 - **Immutable once created:** `spec.service`, `spec.security` and `spec.cloudflare` cannot change after the
   tunnel exists; delete and recreate instead.
@@ -125,6 +123,15 @@ make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
 make deploy IMG=<your-registry>/ai-agent-edge-tunnel:<tag>        # needs the kustomize CLI
 kubectl apply -f config/samples/agentops_v1alpha1_agentedgetunnel.yaml
 ```
+
+#### Namespace-scoped install
+
+`kubectl apply -k config/overlays/namespaced` installs the operator with no ClusterRole at all. It runs with
+`--watch-namespaces=agents` (env `EDGE_WATCH_NAMESPACES`), so its cache covers only those namespaces, and a `Role`
+and `RoleBinding` in each of them grant the Secret and Deployment access. A compromised operator pod can then read
+Secrets only in the namespaces you listed. Edit `config/overlays/namespaced/tunnel-namespace.yaml` for your
+namespace(s), repeating the Role and RoleBinding for each, and keep `--watch-namespaces` in sync with them.
+AgentEdgeTunnel objects in other namespaces are ignored. This overlay is applied with `kubectl`, not `make deploy`.
 
 `make deploy` sets the manager image to `IMG` on a temporary copy of `config/`. To remove everything, use
 `make undeploy`: it deletes all `AgentEdgeTunnel` objects and waits for their Cloudflare cleanup before it

@@ -1,0 +1,44 @@
+# The namespace the operator manages tunnels in. Change "agents" to yours, and
+# repeat the Role and RoleBinding for every namespace you add.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: edge-tunnel-manager-role
+  namespace: agents
+rules:
+- apiGroups: [agentops.io]
+  resources: [agentedgetunnels]
+  verbs: [get, list, watch, update, patch]
+- apiGroups: [agentops.io]
+  resources: [agentedgetunnels/status]
+  verbs: [get, update, patch]
+- apiGroups: [agentops.io]
+  resources: [agentedgetunnels/finalizers]
+  verbs: [update]
+- apiGroups: [apps]
+  resources: [deployments]
+  verbs: [get, list, watch, create, update, patch, delete]
+# Secrets hold tunnel credentials; only get/create/update/delete, never list or
+# watch, and only in this namespace.
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get, create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: edge-tunnel-manager-rolebinding
+  namespace: agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: edge-tunnel-manager-role
+subjects:
+- kind: ServiceAccount
+  name: edge-tunnel-controller-manager
+  namespace: edge-tunnel-system

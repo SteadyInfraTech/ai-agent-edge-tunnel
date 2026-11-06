@@ -1,0 +1,32 @@
+# Namespace-scoped install: the operator watches, and can touch Secrets and
+# Deployments in, only the namespaces listed below. Nothing is granted
+# cluster-wide.
+#
+#   kubectl apply -k config/overlays/namespaced
+#
+# To add a namespace, copy the Role and RoleBinding in tunnel-namespace.yaml
+# with the new namespace, and add it to --watch-namespaces in
+# watch-namespaces-patch.yaml. Set EDGE_BASE_DOMAIN and CONNECTOR_IMAGE as for
+# the default install.
+resources:
+- ../../default
+- tunnel-namespace.yaml
+patches:
+# Drop the cluster-wide grant.
+- target: {kind: ClusterRole, name: edge-tunnel-manager-role}
+  patch: |-
+    $patch: delete
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: edge-tunnel-manager-role
+- target: {kind: ClusterRoleBinding, name: edge-tunnel-manager-rolebinding}
+  patch: |-
+    $patch: delete
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: edge-tunnel-manager-rolebinding
+# Restrict the manager's cache to the same namespaces.
+- target: {kind: Deployment, name: edge-tunnel-controller-manager}
+  path: watch-namespaces-patch.yaml
