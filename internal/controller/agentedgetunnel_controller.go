@@ -107,8 +107,9 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// The finalizer must exist before any Cloudflare resource is created, or a
 	// delete could race ahead of cleanup and leak the tunnel.
+	orig := tunnel.DeepCopy()
 	if controllerutil.AddFinalizer(&tunnel, FinalizerName) {
-		if err := r.Update(ctx, &tunnel); err != nil {
+		if err := r.patchFinalizers(ctx, &tunnel, orig); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -185,8 +186,19 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 	if err := r.cleanup(ctx, t); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleaning up Cloudflare resources: %w", err)
 	}
+	orig := t.DeepCopy()
 	controllerutil.RemoveFinalizer(t, FinalizerName)
-	return ctrl.Result{}, r.Update(ctx, t)
+	return ctrl.Result{}, r.patchFinalizers(ctx, t, orig)
+}
+
+// patchFinalizers writes only the finalizer change. A typed Update would send
+// the whole object back, and because of omitempty that silently drops
+// explicitly set false or empty spec fields (security.allowPublic: false, for
+// example). The CRD's immutability rules would then reject the write and the
+// object could never be deleted. The patch carries the resourceVersion, so a
+// concurrent change still conflicts and is retried.
+func (r *AgentEdgeTunnelReconciler) patchFinalizers(ctx context.Context, t, orig *agentopsv1alpha1.AgentEdgeTunnel) error {
+	return r.Patch(ctx, t, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
 }
 
 // reconcileActive handles an Active object: it cleans up once the TTL has
