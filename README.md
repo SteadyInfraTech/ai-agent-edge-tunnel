@@ -79,10 +79,12 @@ Access and does not route to any pod.
 
 ## Configuring GitHub Actions CI Secrets
 
-To run live integration tests in GitHub CI:
-1. Navigate to your repository **Settings -> Secrets and variables -> Actions**.
-2. Add `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID` and (optionally) `CLOUDFLARE_TEST_HOSTNAME`.
-3. The CI workflow in `.github/workflows/ci.yml` will automatically consume these secrets during integration test steps.
+The live Cloudflare test runs only after a merge to `main` (or when started by hand on `main`), never on pull
+requests, so pull-request code cannot read the credentials. To enable it:
+1. Navigate to **Settings -> Environments**, create an environment named `cloudflare-live`, and restrict its
+   deployment branches to `main`.
+2. Add `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID` and (optionally)
+   `CLOUDFLARE_TEST_HOSTNAME` as **environment** secrets, and remove any repository-level copies.
 
 ## License
 Apache-2.0
