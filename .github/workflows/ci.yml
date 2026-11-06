@@ -54,7 +54,11 @@ jobs:
     # Credentials must never reach code from a pull request, including one from
     # a branch of this repository, so this job runs only after a merge to main
     # (or when started by hand), never on pull_request.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
     # One live run at a time, queued rather than cancelled, so runs do not
     # contend for the same Cloudflare account. Test resources are also named
     # uniquely per run.
