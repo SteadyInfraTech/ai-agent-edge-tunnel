@@ -2,7 +2,10 @@
 # Deployments in, only the namespaces listed below. Nothing is granted
 # cluster-wide.
 #
-#   kubectl apply -k config/overlays/namespaced
+#   make deploy-namespaced IMG=<your-registry>/ai-agent-edge-tunnel:<tag>
+#
+# (A bare `kubectl apply -k` works too but runs the image named in
+# config/manager/kustomization.yaml, not the one you built.)
 #
 # To add a namespace, copy the Role and RoleBinding in tunnel-namespace.yaml
 # with the new namespace, and add it to --watch-namespaces in

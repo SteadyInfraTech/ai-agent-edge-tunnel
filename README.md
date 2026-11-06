@@ -128,12 +128,12 @@ kubectl apply -f config/samples/agentops_v1alpha1_agentedgetunnel.yaml
 
 #### Namespace-scoped install
 
-`kubectl apply -k config/overlays/namespaced` installs the operator with no ClusterRole at all. It runs with
+`make deploy-namespaced IMG=<image>` (or `kubectl apply -k config/overlays/namespaced`, which uses the checked-in image) installs the operator with no ClusterRole at all. It runs with
 `--watch-namespaces=agents` (env `EDGE_WATCH_NAMESPACES`), so its cache covers only those namespaces, and a `Role`
 and `RoleBinding` in each of them grant the Secret and Deployment access. A compromised operator pod can then read
 Secrets only in the namespaces you listed. Edit `config/overlays/namespaced/tunnel-namespace.yaml` for your
 namespace(s), repeating the Role and RoleBinding for each, and keep `--watch-namespaces` in sync with them.
-AgentEdgeTunnel objects in other namespaces are ignored. This overlay is applied with `kubectl`, not `make deploy`.
+AgentEdgeTunnel objects in other namespaces are ignored. `make undeploy` removes either install.
 
 `make deploy` sets the manager image to `IMG` on a temporary copy of `config/`. To remove everything, use
 `make undeploy`: it deletes all `AgentEdgeTunnel` objects and waits for their Cloudflare cleanup before it

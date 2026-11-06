@@ -1,7 +1,7 @@
 NAME = ai-agent-edge-tunnel
 VERSION ?= 0.1.0
 
-.PHONY: all build test vet clean manifests docker-build install uninstall deploy undeploy
+.PHONY: all build test vet clean manifests docker-build install uninstall deploy deploy-namespaced undeploy
 
 all: test build
 
@@ -32,6 +32,14 @@ deploy:
 	rm -rf .deploy && mkdir .deploy && cp -r config .deploy/config
 	cd .deploy/config/manager && kustomize edit set image controller=$(IMG)
 	kubectl apply -k .deploy/config/default
+	rm -rf .deploy
+
+# deploy-namespaced is deploy for the namespace-scoped install (see
+# config/overlays/namespaced): no cluster-wide RBAC, same IMG handling.
+deploy-namespaced:
+	rm -rf .deploy && mkdir .deploy && cp -r config .deploy/config
+	cd .deploy/config/manager && kustomize edit set image controller=$(IMG)
+	kubectl apply -k .deploy/config/overlays/namespaced
 	rm -rf .deploy
 
 # undeploy deletes every AgentEdgeTunnel first and waits for the manager to

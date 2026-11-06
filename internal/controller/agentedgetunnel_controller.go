@@ -220,6 +220,17 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		return ctrl.Result{}, r.Status().Update(ctx, t)
 	}
 
+	// An object that became Active without an Access application (for example
+	// under an older operator) is already reachable. Create the policy now and
+	// say so loudly until it exists.
+	if err := r.ensureAccess(ctx, t); err != nil {
+		t.Status.Message = "UNPROTECTED: no Access policy yet: " + err.Error()
+		if uerr := r.Status().Update(ctx, t); uerr != nil {
+			log.FromContext(ctx).Error(uerr, "Failed to record missing Access policy in status")
+		}
+		return ctrl.Result{}, fmt.Errorf("protecting active tunnel: %w", err)
+	}
+
 	// Keep the connector in its desired state and reflect whether it is
 	// connected. A failure is surfaced in status as well as retried.
 	ready, err := r.ensureConnector(ctx, t)
