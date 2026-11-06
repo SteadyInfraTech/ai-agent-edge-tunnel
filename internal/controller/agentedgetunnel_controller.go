@@ -373,10 +373,11 @@ func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentop
 	}
 	t.Status.AccessAppID = appID
 	if err := r.Status().Update(ctx, t); err != nil {
-		if delErr := r.CloudflareClient.DeleteAccessApplication(ctx, r.AccountID, appID); delErr != nil {
-			log.FromContext(ctx).Error(delErr, "Failed to remove an unrecorded Access application; it may be orphaned", "appID", appID)
-		}
-		t.Status.AccessAppID = ""
+		// Same reasoning as for the tunnel ID in provision: the error does not
+		// prove the write was rejected. Deleting the application could leave
+		// status naming one that no longer exists, so the hostname would later
+		// go live with no policy. Keep it, and log the ID in case it was lost.
+		log.FromContext(ctx).Error(err, "Status write failed after the Access application was created; keeping it because the write may still commit. If it was lost, delete the application by hand", "appID", appID)
 		return err
 	}
 	return nil

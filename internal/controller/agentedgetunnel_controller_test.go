@@ -130,6 +130,7 @@ func (h *harness) assertConnectorGone() {
 	assert.True(h.t, apierrors.IsNotFound(err), "connector Secret should be gone")
 }
 
+// TestProvisionsProtectedTunnelWithConnector checks: provisions protected tunnel with connector.
 func TestProvisionsProtectedTunnelWithConnector(t *testing.T) {
 	h := newHarness(t, nil)
 
@@ -181,6 +182,7 @@ func TestProvisionsProtectedTunnelWithConnector(t *testing.T) {
 	assert.Empty(t, got.Status.Message)
 }
 
+// TestAccessFailureNeverExposesHostname checks: access failure never exposes hostname.
 func TestAccessFailureNeverExposesHostname(t *testing.T) {
 	h := newHarness(t, nil)
 	h.cf.CreateAccessErr = errors.New("access api down")
@@ -202,6 +204,7 @@ func TestAccessFailureNeverExposesHostname(t *testing.T) {
 	assert.NotEmpty(t, h.cf.DNSRecords)
 }
 
+// TestRetryAfterDNSFailureDoesNotLeak checks: retry after dns failure does not leak.
 func TestRetryAfterDNSFailureDoesNotLeak(t *testing.T) {
 	h := newHarness(t, nil)
 	h.cf.CreateDNSErr = errors.New("cloudflare is down")
@@ -224,6 +227,7 @@ func TestRetryAfterDNSFailureDoesNotLeak(t *testing.T) {
 	assert.Len(t, h.cf.AccessApps, 1)
 }
 
+// TestPublicTunnelSkipsAccess checks: public tunnel skips access.
 func TestPublicTunnelSkipsAccess(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
 		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
@@ -238,6 +242,7 @@ func TestPublicTunnelSkipsAccess(t *testing.T) {
 	assert.NotEmpty(t, h.cf.DNSRecords)
 }
 
+// TestRejectsUnprotectedAndUnsupportedSecurity checks: rejects unprotected and unsupported security.
 func TestRejectsUnprotectedAndUnsupportedSecurity(t *testing.T) {
 	for name, sec := range map[string]agentopsv1alpha1.SecurityConfig{
 		"no policy at all": {},
@@ -266,6 +271,7 @@ func TestRejectsUnprotectedAndUnsupportedSecurity(t *testing.T) {
 	}
 }
 
+// TestTunnelWithoutServiceRunsNoConnector checks: tunnel without service runs no connector.
 func TestTunnelWithoutServiceRunsNoConnector(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.Service = nil })
 
@@ -279,6 +285,7 @@ func TestTunnelWithoutServiceRunsNoConnector(t *testing.T) {
 	h.assertConnectorGone()
 }
 
+// TestForeignSecretFailsBeforeCreatingATunnel checks: foreign secret fails before creating a tunnel.
 func TestForeignSecretFailsBeforeCreatingATunnel(t *testing.T) {
 	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "test-agent-tunnel-cloudflared", Namespace: "default"}}
 	h := newHarness(t, nil, foreign)
@@ -295,6 +302,7 @@ func TestForeignSecretFailsBeforeCreatingATunnel(t *testing.T) {
 	assert.Empty(t, sec.Data, "the foreign Secret must be untouched")
 }
 
+// TestMissingConnectorSecretIsReportedNotSilentlyIgnored checks: missing connector secret is reported not silently ignored.
 func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -310,6 +318,7 @@ func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	assert.Contains(t, h.get().Status.Message, "delete and recreate")
 }
 
+// TestTTLExpiryCleansEverythingAndDoesNotReprovision checks: ttl expiry cleans everything and does not reprovision.
 func TestTTLExpiryCleansEverythingAndDoesNotReprovision(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -336,6 +345,7 @@ func TestTTLExpiryCleansEverythingAndDoesNotReprovision(t *testing.T) {
 	h.assertConnectorGone()
 }
 
+// TestDeleteCleansEverythingViaFinalizer checks: delete cleans everything via finalizer.
 func TestDeleteCleansEverythingViaFinalizer(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -357,6 +367,7 @@ func TestDeleteCleansEverythingViaFinalizer(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "finalizer should be removed after cleanup")
 }
 
+// TestCleanupFailureKeepsFinalizerAndRetries checks: cleanup failure keeps finalizer and retries.
 func TestCleanupFailureKeepsFinalizerAndRetries(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -381,6 +392,7 @@ func TestCleanupFailureKeepsFinalizerAndRetries(t *testing.T) {
 	assert.Empty(t, h.cf.AccessApps)
 }
 
+// TestInvalidTTLFailsWithoutCreatingAnything checks: invalid ttl fails without creating anything.
 func TestInvalidTTLFailsWithoutCreatingAnything(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.TTL = "not-a-duration" })
 
@@ -394,6 +406,7 @@ func TestInvalidTTLFailsWithoutCreatingAnything(t *testing.T) {
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
+// TestEmptyTTLMeansNoExpiry checks: empty ttl means no expiry.
 func TestEmptyTTLMeansNoExpiry(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.TTL = "" })
 	_, err := h.reconcile()
@@ -401,6 +414,7 @@ func TestEmptyTTLMeansNoExpiry(t *testing.T) {
 	assert.Nil(t, h.get().Status.ExpiresAt)
 }
 
+// TestConnectorPodIsHardened checks: connector pod is hardened.
 func TestConnectorPodIsHardened(t *testing.T) {
 	cr := &agentopsv1alpha1.AgentEdgeTunnel{
 		ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns", UID: "u"},
@@ -443,6 +457,7 @@ func TestConnectorPodIsHardened(t *testing.T) {
 	assert.Equal(t, int32(1), *dep.Spec.Replicas)
 }
 
+// TestConnectorRefusesToAdoptForeignDeployment checks: connector refuses to adopt foreign deployment.
 func TestConnectorRefusesToAdoptForeignDeployment(t *testing.T) {
 	cr := &agentopsv1alpha1.AgentEdgeTunnel{
 		ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns", UID: "u"},
@@ -457,6 +472,7 @@ func TestConnectorRefusesToAdoptForeignDeployment(t *testing.T) {
 	assert.Contains(t, err.Error(), "refusing to adopt")
 }
 
+// TestConnectorConfigRendering checks: connector config rendering.
 func TestConnectorConfigRendering(t *testing.T) {
 	got := connectorConfig("tid", "a.example.com", &agentopsv1alpha1.ServiceTarget{Name: "svc", Port: 9000}, "team-a")
 	assert.Equal(t, `tunnel: tid
@@ -468,12 +484,14 @@ ingress:
 `, got)
 }
 
+// TestTunnelNameIsUniquePerNamespace checks: tunnel name is unique per namespace.
 func TestTunnelNameIsUniquePerNamespace(t *testing.T) {
 	a := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "team-a", UID: "aaaaaaaa-1111"}}
 	b := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "team-b", UID: "bbbbbbbb-2222"}}
 	assert.NotEqual(t, tunnelName(a), tunnelName(b))
 }
 
+// TestEmptyCloudflareSettingsFailBeforeCreatingAnything checks: empty cloudflare settings fail before creating anything.
 func TestEmptyCloudflareSettingsFailBeforeCreatingAnything(t *testing.T) {
 	// A resource without spec.cloudflare must never reach Cloudflare, even if the
 	// CRD that should reject it is out of date.
@@ -489,6 +507,7 @@ func TestEmptyCloudflareSettingsFailBeforeCreatingAnything(t *testing.T) {
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
+// TestRealModeDiscardsStatusWrittenByDryRun checks: real mode discards status written by dry run.
 func TestRealModeDiscardsStatusWrittenByDryRun(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile() // dry-run provisions against the fake
@@ -508,6 +527,7 @@ func TestRealModeDiscardsStatusWrittenByDryRun(t *testing.T) {
 	assert.Contains(t, h.cf.Tunnels, fakeID, "a real operator must not pretend to delete a fake tunnel")
 }
 
+// TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp checks: real mode deletes dry run object without pretending to clean up.
 func TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -527,6 +547,7 @@ func TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp(t *testing.T) {
 	assert.Len(t, h.cf.Tunnels, 1, "the fake tunnel was never touched by the real-mode operator")
 }
 
+// TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer checks: dry run refuses objects with real i ds and keeps finalizer.
 func TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
 		cr.Finalizers = []string{FinalizerName}
@@ -557,8 +578,12 @@ type flakyStatusClient struct {
 	client.Client
 	stored bool
 	failed bool
+	// onAccess fails the write that records the Access application instead of
+	// the one that records the tunnel.
+	onAccess bool
 }
 
+// Status returns a writer whose Update can fail on demand.
 func (c *flakyStatusClient) Status() client.SubResourceWriter {
 	return &flakyStatusWriter{SubResourceWriter: c.Client.Status(), c: c}
 }
@@ -568,9 +593,14 @@ type flakyStatusWriter struct {
 	c *flakyStatusClient
 }
 
+// Update fails the status write that records a new tunnel, optionally after
+// applying it.
 func (w *flakyStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 	t, ok := obj.(*agentopsv1alpha1.AgentEdgeTunnel)
-	if ok && !w.c.failed && t.Status.TunnelID != "" && t.Status.Phase == agentopsv1alpha1.PhasePending {
+	hit := ok && t.Status.Phase == agentopsv1alpha1.PhasePending &&
+		((w.c.onAccess && t.Status.AccessAppID != "") ||
+			(!w.c.onAccess && t.Status.TunnelID != "" && t.Status.AccessAppID == ""))
+	if hit && !w.c.failed {
 		w.c.failed = true
 		if w.c.stored {
 			if err := w.SubResourceWriter.Update(ctx, obj, opts...); err != nil {
@@ -582,6 +612,7 @@ func (w *flakyStatusWriter) Update(ctx context.Context, obj client.Object, opts 
 	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
+// TestAmbiguousStatusWriteKeepsTheTunnel checks: ambiguous status write keeps the tunnel.
 func TestAmbiguousStatusWriteKeepsTheTunnel(t *testing.T) {
 	for name, stored := range map[string]bool{"write lost": false, "write applied despite error": true} {
 		t.Run(name, func(t *testing.T) {
@@ -608,6 +639,7 @@ func TestAmbiguousStatusWriteKeepsTheTunnel(t *testing.T) {
 	}
 }
 
+// TestRejectsInvalidServiceTarget checks: rejects invalid service target.
 func TestRejectsInvalidServiceTarget(t *testing.T) {
 	for name, svc := range map[string]*agentopsv1alpha1.ServiceTarget{
 		"name with a newline": {Name: "svc\n  - hostname: evil.example.com", Port: 8080},
@@ -625,4 +657,26 @@ func TestRejectsInvalidServiceTarget(t *testing.T) {
 			assert.Zero(t, h.cf.CreateTunnelCalls, "nothing may be created for an invalid spec")
 		})
 	}
+}
+
+// TestAmbiguousAccessStatusWriteKeepsTheApplication checks: a failed status
+// write after creating the Access application must not delete it.
+func TestAmbiguousAccessStatusWriteKeepsTheApplication(t *testing.T) {
+	h := newHarness(t, nil)
+	h.r.Client = &flakyStatusClient{Client: h.k8s, stored: true, onAccess: true}
+
+	_, err := h.reconcile()
+	require.Error(t, err)
+
+	require.Len(t, h.cf.AccessApps, 1, "the application must be kept")
+	got := h.get()
+	require.NotEmpty(t, got.Status.AccessAppID)
+	for id := range h.cf.AccessApps {
+		assert.Equal(t, id, got.Status.AccessAppID, "status must name a live application")
+	}
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Equal(t, 1, h.cf.CreateAccessCalls, "the retry must reuse the stored application")
 }

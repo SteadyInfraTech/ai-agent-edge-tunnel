@@ -97,7 +97,7 @@ type AgentEdgeTunnelStatus struct {
 // +kubebuilder:printcolumn:name="Hostname",type=string,JSONPath=`.status.hostname`
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.phase) || self.status.phase != 'Active' || (has(self.spec.ttl) ? self.spec.ttl : '') == (has(oldSelf.spec.ttl) ? oldSelf.spec.ttl : '')",message="spec.ttl cannot change while the tunnel is Active; delete and recreate the object to change it"
 // +kubebuilder:printcolumn:name="Connected",type=boolean,JSONPath=`.status.connectorReady`
-// +kubebuilder:printcolumn:name="Expires",type=date,JSONPath=`.status.expiresAt`
+// +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.status.expiresAt`
 
 // AgentEdgeTunnel is the Schema for the agentedgetunnels API
 type AgentEdgeTunnel struct {

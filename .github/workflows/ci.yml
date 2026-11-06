@@ -5,6 +5,7 @@ on:
     branches: [ main ]
   # Every pull request, not just those targeting main, so stacked PRs are tested.
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -50,8 +51,10 @@ jobs:
   live-test:
     name: Live Cloudflare API test
     runs-on: ubuntu-latest
-    # Skip fork PRs, which cannot read secrets.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     # One live run at a time, queued rather than cancelled, so runs do not
     # contend for the same Cloudflare account. Test resources are also named
     # uniquely per run.

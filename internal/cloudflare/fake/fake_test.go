@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestFakeOnlyDeletesRecordsOwnedByTunnel checks: fake only deletes records owned by tunnel.
 func TestFakeOnlyDeletesRecordsOwnedByTunnel(t *testing.T) {
 	c := New()
 	ctx := context.Background()
@@ -28,6 +29,7 @@ func TestFakeOnlyDeletesRecordsOwnedByTunnel(t *testing.T) {
 	assert.Empty(t, c.Tunnels)
 }
 
+// TestFakeAccessApplicationLifecycle checks: fake access application lifecycle.
 func TestFakeAccessApplicationLifecycle(t *testing.T) {
 	c := New()
 	ctx := context.Background()
@@ -44,6 +46,7 @@ func TestFakeAccessApplicationLifecycle(t *testing.T) {
 	assert.Empty(t, c.AccessApps)
 }
 
+// TestFakeRejectsHostnameOwnedByAnotherTunnel checks: fake rejects hostname owned by another tunnel.
 func TestFakeRejectsHostnameOwnedByAnotherTunnel(t *testing.T) {
 	c := New()
 	ctx := context.Background()

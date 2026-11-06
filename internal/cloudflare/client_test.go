@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestCheckExistingRecord checks: check existing record.
 func TestCheckExistingRecord(t *testing.T) {
 	yes, no := true, false
 	rec := func(typ, content string, proxied *bool) cloudflare.DNSRecord {
@@ -28,6 +29,7 @@ func TestCheckExistingRecord(t *testing.T) {
 	assert.Error(t, checkExistingRecord(rec("A", target, &yes), "h.example.com", "t1"), "wrong type")
 }
 
+// TestSelectCNAMEIgnoresOtherRecordTypesAndOrder checks: select c n a m e ignores other record types and order.
 func TestSelectCNAMEIgnoresOtherRecordTypesAndOrder(t *testing.T) {
 	yes := true
 	txt := cloudflare.DNSRecord{Type: "TXT", Content: "v=spf1 -all"}
@@ -59,6 +61,7 @@ func TestSelectCNAMEIgnoresOtherRecordTypesAndOrder(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// TestIsNotFound checks: is not found.
 func TestIsNotFound(t *testing.T) {
 	notFound := cloudflare.NewNotFoundError(&cloudflare.Error{StatusCode: 404, Type: cloudflare.ErrorTypeNotFound})
 	serverErr := cloudflare.NewServiceError(&cloudflare.Error{StatusCode: 500, Type: cloudflare.ErrorTypeService})
@@ -70,6 +73,7 @@ func TestIsNotFound(t *testing.T) {
 	assert.False(t, isNotFound(nil))
 }
 
+// TestLiveCloudflareTunnel checks: live cloudflare tunnel.
 func TestLiveCloudflareTunnel(t *testing.T) {
 	apiToken := os.Getenv("CLOUDFLARE_API_TOKEN")
 	accountID := os.Getenv("CLOUDFLARE_ACCOUNT_ID")

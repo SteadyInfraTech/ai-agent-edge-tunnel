@@ -28,7 +28,7 @@ spec:
       type: boolean
       jsonPath: .status.connectorReady
     - name: Expires
-      type: date
+      type: string
       jsonPath: .status.expiresAt
     schema:
       openAPIV3Schema:
