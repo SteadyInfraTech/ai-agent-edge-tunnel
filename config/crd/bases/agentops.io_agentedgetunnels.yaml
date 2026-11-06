@@ -25,7 +25,7 @@ spec:
       type: string
       jsonPath: .status.hostname
     - name: Expires
-      type: date
+      type: string
       jsonPath: .status.expiresAt
     schema:
       openAPIV3Schema:

@@ -89,6 +89,7 @@ func (h *harness) get() agentopsv1alpha1.AgentEdgeTunnel {
 	return got
 }
 
+// TestProvisionsTunnel checks: provisions tunnel.
 func TestProvisionsTunnel(t *testing.T) {
 	h := newHarness(t, withTTL("1h"))
 
@@ -106,6 +107,7 @@ func TestProvisionsTunnel(t *testing.T) {
 	assert.Equal(t, got.Status.TunnelID, h.cf.DNSRecords["agent-job-001.agents.example.com"])
 }
 
+// TestTTLExpiryTerminatesAndDoesNotReprovision checks: t t l expiry terminates and does not reprovision.
 func TestTTLExpiryTerminatesAndDoesNotReprovision(t *testing.T) {
 	h := newHarness(t, withTTL("1h"))
 	_, err := h.reconcile()
@@ -128,6 +130,7 @@ func TestTTLExpiryTerminatesAndDoesNotReprovision(t *testing.T) {
 	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
 }
 
+// TestRetryAfterDNSFailureDoesNotLeakTunnels checks: retry after d n s failure does not leak tunnels.
 func TestRetryAfterDNSFailureDoesNotLeakTunnels(t *testing.T) {
 	h := newHarness(t, withTTL(""))
 	h.cf.CreateDNSErr = errors.New("cloudflare is down")
@@ -148,6 +151,7 @@ func TestRetryAfterDNSFailureDoesNotLeakTunnels(t *testing.T) {
 	assert.Nil(t, h.get().Status.ExpiresAt, "empty ttl means no expiry")
 }
 
+// TestDeleteRunsCleanupViaFinalizer checks: delete runs cleanup via finalizer.
 func TestDeleteRunsCleanupViaFinalizer(t *testing.T) {
 	h := newHarness(t, withTTL("1h"))
 	_, err := h.reconcile()
@@ -167,6 +171,7 @@ func TestDeleteRunsCleanupViaFinalizer(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "finalizer should be removed after cleanup")
 }
 
+// TestCleanupFailureKeepsFinalizer checks: cleanup failure keeps finalizer.
 func TestCleanupFailureKeepsFinalizer(t *testing.T) {
 	h := newHarness(t, withTTL("1h"))
 	_, err := h.reconcile()
@@ -189,6 +194,7 @@ func TestCleanupFailureKeepsFinalizer(t *testing.T) {
 	assert.Empty(t, h.cf.Tunnels)
 }
 
+// TestInvalidTTLFailsWithoutCreatingTunnel checks: invalid t t l fails without creating tunnel.
 func TestInvalidTTLFailsWithoutCreatingTunnel(t *testing.T) {
 	h := newHarness(t, withTTL("not-a-duration"))
 
@@ -202,12 +208,14 @@ func TestInvalidTTLFailsWithoutCreatingTunnel(t *testing.T) {
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
+// TestTunnelNameIsUniquePerNamespace checks: tunnel name is unique per namespace.
 func TestTunnelNameIsUniquePerNamespace(t *testing.T) {
 	a := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "team-a", UID: "aaaaaaaa-1111"}}
 	b := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "team-b", UID: "bbbbbbbb-2222"}}
 	assert.NotEqual(t, tunnelName(a), tunnelName(b))
 }
 
+// TestEmptyCloudflareSettingsFailBeforeCreatingAnything checks: empty cloudflare settings fail before creating anything.
 func TestEmptyCloudflareSettingsFailBeforeCreatingAnything(t *testing.T) {
 	// A resource without spec.cloudflare must never reach Cloudflare, even if the
 	// CRD that should reject it is out of date.
@@ -223,6 +231,7 @@ func TestEmptyCloudflareSettingsFailBeforeCreatingAnything(t *testing.T) {
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
+// TestRealModeDiscardsStatusWrittenByDryRun checks: real mode discards status written by dry run.
 func TestRealModeDiscardsStatusWrittenByDryRun(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile() // dry-run provisions against the fake
@@ -242,6 +251,7 @@ func TestRealModeDiscardsStatusWrittenByDryRun(t *testing.T) {
 	assert.Contains(t, h.cf.Tunnels, fakeID, "a real operator must not pretend to delete a fake tunnel")
 }
 
+// TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp checks: real mode deletes dry run object without pretending to clean up.
 func TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -261,6 +271,7 @@ func TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp(t *testing.T) {
 	assert.Len(t, h.cf.Tunnels, 1, "the fake tunnel was never touched by the real-mode operator")
 }
 
+// TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer checks: dry run refuses objects with real i ds and keeps finalizer.
 func TestDryRunRefusesObjectsWithRealIDsAndKeepsFinalizer(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
 		cr.Finalizers = []string{FinalizerName}
@@ -293,6 +304,7 @@ type flakyStatusClient struct {
 	failed bool
 }
 
+// Status returns a writer whose Update can fail on demand.
 func (c *flakyStatusClient) Status() client.SubResourceWriter {
 	return &flakyStatusWriter{SubResourceWriter: c.Client.Status(), c: c}
 }
@@ -302,6 +314,8 @@ type flakyStatusWriter struct {
 	c *flakyStatusClient
 }
 
+// Update fails the status write that records a new tunnel, optionally after
+// applying it.
 func (w *flakyStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 	t, ok := obj.(*agentopsv1alpha1.AgentEdgeTunnel)
 	if ok && !w.c.failed && t.Status.TunnelID != "" && t.Status.Phase == agentopsv1alpha1.PhasePending {
@@ -316,6 +330,7 @@ func (w *flakyStatusWriter) Update(ctx context.Context, obj client.Object, opts 
 	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
+// TestAmbiguousStatusWriteKeepsTheTunnel checks: ambiguous status write keeps the tunnel.
 func TestAmbiguousStatusWriteKeepsTheTunnel(t *testing.T) {
 	for name, stored := range map[string]bool{"write lost": false, "write applied despite error": true} {
 		t.Run(name, func(t *testing.T) {
