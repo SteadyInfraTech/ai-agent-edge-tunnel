@@ -6,7 +6,7 @@ VERSION ?= 0.1.0
 all: test build
 
 build:
-	go build -o bin/manager cmd/main.go
+	go build -o bin/manager ./cmd
 
 vet:
 	go vet ./...
