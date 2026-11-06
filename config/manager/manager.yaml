@@ -27,13 +27,16 @@ spec:
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8080
+        # Required: EDGE_BASE_DOMAIN (a zone you control in Cloudflare) and
+        # CONNECTOR_IMAGE (cloudflared, pinned to a version or digest). They are
+        # deliberately not set here, so the operator refuses to start rather than
+        # guess. Provide them without editing this file:
+        #   kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
+        #     --from-literal=EDGE_BASE_DOMAIN=agents.example.com \
+        #     --from-literal=CONNECTOR_IMAGE=cloudflare/cloudflared:2026.x.y
+        envFrom:
+        - configMapRef: {name: edge-tunnel-config, optional: true}
         env:
-        # Required. Left empty on purpose: the operator refuses to start until
-        # these are set, rather than guessing a domain or an image.
-        - name: EDGE_BASE_DOMAIN
-          value: ""        # e.g. agents.example.com (a zone you control in Cloudflare)
-        - name: CONNECTOR_IMAGE
-          value: ""        # cloudflared image, pinned to a version or digest
         # Create this Secret first:
         #   kubectl -n edge-tunnel-system create secret generic edge-tunnel-cloudflare \
         #     --from-literal=account-id=... --from-literal=api-token=...

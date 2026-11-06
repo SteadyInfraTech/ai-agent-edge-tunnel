@@ -643,6 +643,10 @@ func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
 	// connectorConfig interpolates these into YAML, so they are checked here
 	// even though the CRD checks them too.
 	if svc := t.Spec.Service; svc != nil {
+		// The name becomes a label value on the connector pods.
+		if len(t.Name) > validation.LabelValueMaxLength {
+			return 0, fmt.Errorf("metadata.name must be at most %d characters when spec.service is set", validation.LabelValueMaxLength)
+		}
 		if errs := validation.IsDNS1035Label(svc.Name); len(errs) > 0 {
 			return 0, fmt.Errorf("spec.service.name is invalid: %s", strings.Join(errs, "; "))
 		}

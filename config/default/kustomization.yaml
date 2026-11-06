@@ -1,7 +1,8 @@
 # kubectl apply -k config/default
 #
 # Before applying, create the Cloudflare credentials Secret and set
-# EDGE_BASE_DOMAIN and CONNECTOR_IMAGE (see config/manager/manager.yaml).
+# the edge-tunnel-config ConfigMap holding EDGE_BASE_DOMAIN and CONNECTOR_IMAGE
+# (see config/manager/manager.yaml); the operator will not start without them.
 namespace: edge-tunnel-system
 resources:
 - namespace.yaml

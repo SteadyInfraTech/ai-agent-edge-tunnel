@@ -6,7 +6,7 @@
 #
 # To add a namespace, copy the Role and RoleBinding in tunnel-namespace.yaml
 # with the new namespace, and add it to --watch-namespaces in
-# watch-namespaces-patch.yaml. Set EDGE_BASE_DOMAIN and CONNECTOR_IMAGE as for
+# watch-namespaces-patch.yaml. Create the edge-tunnel-config ConfigMap as for
 # the default install.
 resources:
 - ../../default
