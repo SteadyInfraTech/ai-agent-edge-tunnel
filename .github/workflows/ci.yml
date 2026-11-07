@@ -94,3 +94,60 @@ jobs:
       - name: Run Live Cloudflare API Test
         if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
         run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
