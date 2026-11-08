@@ -101,7 +101,11 @@ jobs:
     timeout-minutes: 30
     # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
     # pull request, and only through the cloudflare-live environment.
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
     environment: cloudflare-live
     # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
     concurrency:
