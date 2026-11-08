@@ -198,5 +198,20 @@ requests, so pull-request code cannot read the credentials. To enable it:
 2. Add `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID` and (optionally)
    `CLOUDFLARE_TEST_HOSTNAME` as **environment** secrets, and remove any repository-level copies.
 
+### Live end-to-end test on kind (optional)
+
+A second job, `Live end-to-end on kind`, runs both operators and the agentops-client in a kind cluster
+against real Cloudflare: session to tunnel, connector, DNS, the Access gate on the public URL, and teardown.
+On a successful run it checks that nothing is left in Cloudflare. After a failed run it tries to remove
+leftovers for that run, but a failed lookup or delete, or a run that stopped before a tunnel ID was recorded,
+can leave resources behind, so inspect Cloudflare (tunnels, DNS records, Access applications named `ci-<run id>`
+or `early-<run id>`) after any failure. It needs everything above, with `CLOUDFLARE_TEST_HOSTNAME`
+required (a hostname one level below the zone, such as `ci-test.example.com`), plus:
+
+- Zero Trust enabled on the Cloudflare account. Without it Cloudflare answers `access.api.error.not_enabled`
+  and no Access application can be created (Cloudflare asks for a payment method even on the free plan).
+- An API token allowed to edit Access applications and policies, Cloudflare Tunnel and DNS.
+- A repository **variable** (not secret) `LIVE_E2E_ENABLED` set to `true`. Without it the job is skipped.
+
 ## License
 Apache-2.0
