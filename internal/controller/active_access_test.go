@@ -24,6 +24,7 @@ func TestActiveTunnelWithoutAccessAppGetsProtected(t *testing.T) {
 	cr := h.get()
 	cr.Status.AccessAppID = ""
 	require.NoError(t, h.k8s.Status().Update(context.Background(), &cr))
+	clear(h.cf.AccessApps) // no application exists in Cloudflare either
 	h.cf.CreateAccessErr = errors.New("access api down")
 
 	_, err = h.reconcile()
@@ -36,4 +37,25 @@ func TestActiveTunnelWithoutAccessAppGetsProtected(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, h.get().Status.AccessAppID)
 	assert.NotContains(t, h.get().Status.Message, "UNPROTECTED")
+}
+
+// TestActiveTunnelThatLostItsAccessAppIDReadoptsTheApplication checks that an
+// application that still exists in Cloudflare is found again, not duplicated and
+// not deleted (which would leave the live hostname unprotected).
+func TestActiveTunnelThatLostItsAccessAppIDReadoptsTheApplication(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	appID := h.get().Status.AccessAppID
+	require.NotEmpty(t, appID)
+
+	cr := h.get()
+	cr.Status.AccessAppID = ""
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &cr))
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, appID, h.get().Status.AccessAppID)
+	assert.Equal(t, 1, h.cf.CreateAccessCalls, "no second application")
+	assert.Contains(t, h.cf.AccessApps, appID, "the protecting application must never be deleted")
 }
