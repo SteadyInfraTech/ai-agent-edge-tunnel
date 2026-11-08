@@ -32,8 +32,30 @@ type TunnelInfo struct {
 	Token     string
 }
 
+// TunnelRef identifies an existing tunnel.
+type TunnelRef struct {
+	ID   string
+	Name string
+}
+
+// AccessAppRef identifies an existing Access application.
+type AccessAppRef struct {
+	ID string
+	// HasAllowPolicy is true when the application has at least one allow
+	// policy. An application without one lets nobody in, so it is a leftover
+	// from an attempt that stopped before attaching the policy.
+	HasAllowPolicy bool
+}
+
 type TunnelService interface {
 	CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error)
+	// FindTunnels returns the tunnels that exist (not deleted) with exactly this
+	// name. Tunnel names are account-wide, so the operator's names identify
+	// the object that created them.
+	FindTunnels(ctx context.Context, name string) ([]TunnelRef, error)
+	// FindAccessApplications returns the Access applications of accountID whose
+	// name and domain both equal the given values.
+	FindAccessApplications(ctx context.Context, accountID, name, domain string) ([]AccessAppRef, error)
 	CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error
 	// CreateAccessPolicy creates an Access application for domain with an allow
 	// policy for the given emails and returns the application ID. If the policy
@@ -268,4 +290,65 @@ func (c *RealCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, host
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// FindTunnels lists the tunnels named exactly name that are not deleted.
+func (c *RealCloudflareClient) FindTunnels(ctx context.Context, name string) ([]TunnelRef, error) {
+	var out []TunnelRef
+	params := cloudflare.TunnelListParams{
+		Name:       name,
+		IsDeleted:  cloudflare.BoolPtr(false),
+		ResultInfo: cloudflare.ResultInfo{PerPage: 100, Page: 1},
+	}
+	for {
+		tunnels, info, err := c.api.ListTunnels(ctx, cloudflare.AccountIdentifier(c.AccountID), params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list Cloudflare tunnels named %q: %w", name, err)
+		}
+		for _, t := range tunnels {
+			// The filter is applied by Cloudflare; checking again means a
+			// changed filter semantic can never make us act on someone else's tunnel.
+			if t.Name == name && t.DeletedAt == nil {
+				out = append(out, TunnelRef{ID: t.ID, Name: t.Name})
+			}
+		}
+		if info == nil || !info.HasMorePages() {
+			return out, nil
+		}
+		params.ResultInfo = info.Next()
+	}
+}
+
+// FindAccessApplications lists the Access applications whose name and domain
+// both match, and whether each has an allow policy.
+func (c *RealCloudflareClient) FindAccessApplications(ctx context.Context, accountID, name, domain string) ([]AccessAppRef, error) {
+	var out []AccessAppRef
+	rc := cloudflare.AccountIdentifier(accountID)
+	params := cloudflare.ListAccessApplicationsParams{ResultInfo: cloudflare.ResultInfo{PerPage: 100, Page: 1}}
+	for {
+		apps, info, err := c.api.ListAccessApplications(ctx, rc, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list Access applications: %w", err)
+		}
+		for _, app := range apps {
+			if app.Name != name || app.Domain != domain {
+				continue
+			}
+			policies, _, err := c.api.ListAccessPolicies(ctx, rc, cloudflare.ListAccessPoliciesParams{ApplicationID: app.ID})
+			if err != nil {
+				return nil, fmt.Errorf("failed to list policies of Access application %s: %w", app.ID, err)
+			}
+			ref := AccessAppRef{ID: app.ID}
+			for _, pol := range policies {
+				if pol.Decision == "allow" && len(pol.Include) > 0 {
+					ref.HasAllowPolicy = true
+				}
+			}
+			out = append(out, ref)
+		}
+		if info == nil || !info.HasMorePages() {
+			return out, nil
+		}
+		params.ResultInfo = info.Next()
+	}
 }

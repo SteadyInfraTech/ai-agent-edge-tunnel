@@ -98,13 +98,27 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 		hostname = suffix + "-" + hostname
 	}
 
-	info, err := client.CreateTunnel(ctx, "ci-test-agent-tunnel-"+suffix)
+	tunnelName := "ci-test-agent-tunnel-" + suffix
+	info, err := client.CreateTunnel(ctx, tunnelName)
 	require.NoError(t, err)
 	require.NotNil(t, info)
 	// Always remove the tunnel, even if a later assertion fails.
 	t.Cleanup(func() {
 		assert.NoError(t, client.DeleteTunnel(context.Background(), info.ID))
+		// A deleted tunnel must no longer be found, or recovery would adopt it.
+		gone, err := client.FindTunnels(context.Background(), tunnelName)
+		assert.NoError(t, err)
+		assert.Empty(t, gone, "a deleted tunnel must not be listed")
 	})
+
+	// The recovery path finds a tunnel by its exact name.
+	found, err := client.FindTunnels(ctx, tunnelName)
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, info.ID, found[0].ID)
+	none, err := client.FindTunnels(ctx, tunnelName+"-nope")
+	require.NoError(t, err)
+	assert.Empty(t, none, "only an exact name may match")
 
 	if zoneID != "" && hostname != "" {
 		// Registered before creation so a failed second create or a failed

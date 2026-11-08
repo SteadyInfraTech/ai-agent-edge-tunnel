@@ -97,7 +97,7 @@ Early `v1alpha1`.
 |---|---|
 | Implemented | Tunnel, Access policy, DNS and cloudflared connector per object; TTL (clock starts when Active); finalizer cleanup that retries; leader election, health probes, metrics |
 | Not implemented | Edge HMAC webhook validation; Access service tokens; `cleanupOnFinish`; reacting to the target pod finishing; more than one connector replica |
-| Known limits | A crash between creating a Cloudflare resource and recording its ID can orphan it (a sweep keyed on an owner tag is the planned fix). The connector Secret cannot be regenerated because Cloudflare returns tunnel credentials only once: if it is deleted, delete and recreate the object. Access applications are created per object, so very large numbers of tunnels count against your Cloudflare plan's limits. |
+| Known limits | After a crash between creating a tunnel or Access application and recording its ID, the next reconcile finds it again by its name (which ends in the first characters of the object's UID) and either adopts it or, if it cannot be used, deletes it and creates a fresh one. A resource whose owner object is gone (for example the object was deleted before the retry) is not swept and has to be removed by hand. Cleanup tries the DNS record, Access application and tunnel independently and keeps the finalizer until all are gone. The connector Secret cannot be regenerated because Cloudflare returns tunnel credentials only once: if it is deleted, delete and recreate the object. Access applications are created per object, so very large numbers of tunnels count against your Cloudflare plan's limits. |
 | Deprecated | `spec.targetPodSelector` is ignored; use `spec.service` |
 
 ## Project Structure

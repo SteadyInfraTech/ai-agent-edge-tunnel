@@ -20,6 +20,7 @@ import (
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
+	cf "github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
 	"github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare/fake"
 )
 
@@ -634,6 +635,17 @@ func TestAmbiguousStatusWriteKeepsTheTunnel(t *testing.T) {
 				for id := range h.cf.Tunnels {
 					assert.Equal(t, id, h.get().Status.TunnelID, "status must name a live tunnel")
 				}
+			} else {
+				// The write was lost: the tunnel is found again by its name and adopted.
+				assert.Empty(t, h.get().Status.TunnelID)
+				_, err = h.reconcile()
+				require.NoError(t, err)
+				assert.Equal(t, 1, h.cf.CreateTunnelCalls, "the retry must adopt the orphan, not create a second tunnel")
+				require.Len(t, h.cf.Tunnels, 1)
+				for id := range h.cf.Tunnels {
+					assert.Equal(t, id, h.get().Status.TunnelID)
+				}
+				assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
 			}
 		})
 	}
@@ -679,4 +691,169 @@ func TestAmbiguousAccessStatusWriteKeepsTheApplication(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
 	assert.Equal(t, 1, h.cf.CreateAccessCalls, "the retry must reuse the stored application")
+}
+
+// orphanTunnel runs one reconcile whose status write is lost, leaving a tunnel
+// and its connector Secret in place with no ID recorded, as after a crash.
+func orphanTunnel(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel)) *harness {
+	t.Helper()
+	h := newHarness(t, mutate)
+	real := h.r.Client
+	h.r.Client = &flakyStatusClient{Client: h.k8s, stored: false}
+	_, err := h.reconcile()
+	require.Error(t, err)
+	h.r.Client = real
+	require.Empty(t, h.get().Status.TunnelID)
+	require.Len(t, h.cf.Tunnels, 1)
+	return h
+}
+
+// TestOrphanTunnelWithoutAServiceIsAdopted checks that a tunnel with no connector needs no Secret to be reused.
+func TestOrphanTunnelWithoutAServiceIsAdopted(t *testing.T) {
+	h := orphanTunnel(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.Service = nil })
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+}
+
+// TestOrphanTunnelWithoutItsSecretIsReplaced checks that a tunnel whose secret is lost is deleted and replaced.
+func TestOrphanTunnelWithoutItsSecretIsReplaced(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	var oldID string
+	for id := range h.cf.Tunnels {
+		oldID = id
+	}
+	sec, err := h.secret()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), sec))
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.NotContains(t, h.cf.Tunnels, oldID, "the unusable tunnel must be deleted")
+	assert.Equal(t, 2, h.cf.CreateTunnelCalls)
+	require.Len(t, h.cf.Tunnels, 1)
+	assert.Contains(t, h.cf.Tunnels, h.get().Status.TunnelID)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+}
+
+// TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsReplaced checks that credentials for a different tunnel are not trusted.
+func TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsReplaced(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	var oldID string
+	for id := range h.cf.Tunnels {
+		oldID = id
+	}
+	sec, err := h.secret()
+	require.NoError(t, err)
+	sec.Data[credentialsKey] = []byte(`{"TunnelID":"some-other-tunnel"}`)
+	require.NoError(t, h.k8s.Update(context.Background(), sec))
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.NotContains(t, h.cf.Tunnels, oldID)
+	assert.Equal(t, 2, h.cf.CreateTunnelCalls)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+}
+
+// TestTunnelNamedForAnotherObjectIsNeverTouched checks that only the tunnel named for this object's UID is recovered.
+func TestTunnelNamedForAnotherObjectIsNeverTouched(t *testing.T) {
+	h := newHarness(t, nil)
+	h.cf.Tunnels["foreign"] = &cf.TunnelInfo{ID: "foreign", Name: "agent-default-test-agent-tunnel-99999999"}
+
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Contains(t, h.cf.Tunnels, "foreign", "a tunnel for a different UID must be left alone")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls)
+	assert.NotEqual(t, "foreign", h.get().Status.TunnelID)
+}
+
+// TestFailedTunnelLookupCreatesNothing checks that a lookup error stops provisioning before any tunnel is created.
+func TestFailedTunnelLookupCreatesNothing(t *testing.T) {
+	h := newHarness(t, nil)
+	h.cf.FindTunnelsErr = errors.New("cloudflare unavailable")
+
+	_, err := h.reconcile()
+	require.Error(t, err)
+	assert.Zero(t, h.cf.CreateTunnelCalls, "without knowing whether one exists, creating another could duplicate it")
+	assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+}
+
+// seedAccessApp records an Access application named as the controller names its own.
+func seedAccessApp(h *harness, id string, emails []string) {
+	h.cf.AccessApps[id] = fake.AccessApp{Name: tunnelName(&agentopsv1alpha1.AgentEdgeTunnel{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent-tunnel", Namespace: "default", UID: "11111111-aaaa-bbbb-cccc-222222222222"},
+	}), Domain: testHostname, Emails: emails}
+}
+
+// TestOrphanAccessAppWithAPolicyIsAdopted checks that a complete application from an earlier attempt is reused.
+func TestOrphanAccessAppWithAPolicyIsAdopted(t *testing.T) {
+	h := newHarness(t, nil)
+	seedAccessApp(h, "orphan-app", []string{"dev@example.com"})
+
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Zero(t, h.cf.CreateAccessCalls, "a second application must not be created")
+	assert.Equal(t, "orphan-app", h.get().Status.AccessAppID)
+	assert.Len(t, h.cf.AccessApps, 1)
+}
+
+// TestOrphanAccessAppWithoutAPolicyIsReplaced checks that an application with no policy is deleted and recreated.
+func TestOrphanAccessAppWithoutAPolicyIsReplaced(t *testing.T) {
+	h := newHarness(t, nil)
+	seedAccessApp(h, "incomplete-app", nil)
+
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.NotContains(t, h.cf.AccessApps, "incomplete-app")
+	assert.Equal(t, 1, h.cf.CreateAccessCalls)
+	require.Len(t, h.cf.AccessApps, 1)
+	assert.Contains(t, h.cf.AccessApps, h.get().Status.AccessAppID)
+}
+
+// TestAccessAppOfAnotherNameIsNeverTouched checks that an application not named for this object is left alone.
+func TestAccessAppOfAnotherNameIsNeverTouched(t *testing.T) {
+	h := newHarness(t, nil)
+	h.cf.AccessApps["foreign-app"] = fake.AccessApp{Name: "someone-elses", Domain: testHostname, Emails: nil}
+
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Contains(t, h.cf.AccessApps, "foreign-app")
+	assert.Equal(t, 1, h.cf.CreateAccessCalls)
+}
+
+// TestFailedAccessLookupNeverExposesTheHostname checks that if the lookup fails, no DNS record is created.
+func TestFailedAccessLookupNeverExposesTheHostname(t *testing.T) {
+	h := newHarness(t, nil)
+	h.cf.FindAccessErr = errors.New("cloudflare unavailable")
+
+	_, err := h.reconcile()
+	require.Error(t, err)
+	assert.Empty(t, h.cf.DNSRecords, "the hostname must not go live without its Access application")
+	assert.Zero(t, h.cf.CreateAccessCalls)
+}
+
+// TestOneFailingCleanupStepDoesNotBlockTheOthers checks that a DNS failure still lets the tunnel and Access application be removed.
+func TestOneFailingCleanupStepDoesNotBlockTheOthers(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Len(t, h.cf.Tunnels, 1)
+	require.Len(t, h.cf.AccessApps, 1)
+
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+	h.cf.DeleteDNSErr = errors.New("zone not found")
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deleting DNS record")
+	assert.Empty(t, h.cf.Tunnels, "the tunnel must not stay in Cloudflare because DNS cleanup failed")
+	assert.Empty(t, h.cf.AccessApps)
+	assert.Contains(t, h.get().Finalizers, FinalizerName, "the DNS record is still there, so the finalizer must stay")
+
+	h.cf.DeleteDNSErr = nil
+	_, err = h.reconcile()
+	require.NoError(t, err, "the retry must still find the IDs and finish")
+	assert.Empty(t, h.cf.DNSRecords)
 }
