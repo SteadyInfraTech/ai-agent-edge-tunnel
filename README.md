@@ -201,8 +201,11 @@ requests, so pull-request code cannot read the credentials. To enable it:
 ### Live end-to-end test on kind (optional)
 
 A second job, `Live end-to-end on kind`, runs both operators and the agentops-client in a kind cluster
-against real Cloudflare: session to tunnel, connector, DNS, the Access gate on the public URL, and teardown
-with a check that nothing is left in Cloudflare. It needs everything above, with `CLOUDFLARE_TEST_HOSTNAME`
+against real Cloudflare: session to tunnel, connector, DNS, the Access gate on the public URL, and teardown.
+On a successful run it checks that nothing is left in Cloudflare. After a failed run it tries to remove
+leftovers for that run, but a failed lookup or delete, or a run that stopped before a tunnel ID was recorded,
+can leave resources behind, so inspect Cloudflare (tunnels, DNS records, Access applications named `ci-<run id>`
+or `early-<run id>`) after any failure. It needs everything above, with `CLOUDFLARE_TEST_HOSTNAME`
 required (a hostname one level below the zone, such as `ci-test.example.com`), plus:
 
 - Zero Trust enabled on the Cloudflare account. Without it Cloudflare answers `access.api.error.not_enabled`
