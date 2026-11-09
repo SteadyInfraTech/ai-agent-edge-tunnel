@@ -1040,3 +1040,74 @@ func TestPublicNamespaceAllowlistUsesExactNames(t *testing.T) {
 	assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
+
+// TestAccessPolicyDriftTerminatesTunnelFailsClosed verifies that externally
+// deleted or modified Access policies cannot leave an Active hostname routed.
+func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
+	cases := map[string]func(*harness){
+		"application deleted": func(h *harness) { delete(h.cf.AccessApps, h.get().Status.AccessAppID) },
+		"allow policy removed": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.Emails = nil
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
+		"allowlist broadened": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.Emails = append(app.Emails, "attacker@example.com")
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
+		"allowed identity changed": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.Emails = []string{"other@example.com"}
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+			require.NotEmpty(t, h.cf.DNSRecords)
+
+			mutate(h)
+			_, err = h.reconcile()
+			require.NoError(t, err, "successful fail-closed cleanup should converge")
+			got := h.get()
+			assert.Equal(t, agentopsv1alpha1.PhaseTerminated, got.Status.Phase)
+			assert.Contains(t, got.Status.Message, "policy drift detected")
+			assert.Empty(t, h.cf.DNSRecords, "DNS routing must be removed")
+			assert.Empty(t, h.cf.Tunnels, "the tunnel must be removed")
+			assert.Empty(t, h.cf.AccessApps, "the recorded Access application must be cleaned up")
+		})
+	}
+}
+
+// TestActiveTunnelKeepsResourcesWhenAccessVerificationFails verifies that a
+// transient Cloudflare API error is not mistaken for confirmed policy drift.
+func TestActiveTunnelKeepsResourcesWhenAccessVerificationFails(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+
+	active := h.get()
+	require.NotEmpty(t, active.Status.TunnelID)
+	require.NotEmpty(t, active.Status.AccessAppID)
+	require.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
+	require.Len(t, h.cf.Tunnels, 1)
+	require.Len(t, h.cf.AccessApps, 1)
+
+	h.cf.FindAccessErr = errors.New("Cloudflare API temporarily unavailable")
+	_, err = h.reconcile()
+	require.Error(t, err)
+
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
+	assert.True(t, strings.HasPrefix(got.Status.Message, "UNPROTECTED:"), "message should explain that policy verification failed")
+	assert.Equal(t, map[string]string{active.Status.Hostname: active.Status.TunnelID}, h.cf.DNSRecords)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+	assert.Len(t, h.cf.Tunnels, 1)
+	assert.Contains(t, h.cf.AccessApps, active.Status.AccessAppID)
+	assert.Len(t, h.cf.AccessApps, 1)
+}

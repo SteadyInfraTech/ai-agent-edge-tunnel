@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -55,6 +56,8 @@ type TunnelService interface {
 	// FindAccessApplications returns the Access applications of accountID whose
 	// name and domain both equal the given values.
 	FindAccessApplications(ctx context.Context, accountID, name, domain string) ([]AccessAppRef, error)
+	// VerifyAccessPolicy checks that the recorded application still has exactly the intended allow policy.
+	VerifyAccessPolicy(ctx context.Context, accountID, appID, name, domain string, allowedEmails []string) (bool, error)
 	CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error
 	// CreateAccessPolicy creates an Access application for domain with an allow
 	// policy for the given emails and returns the application ID. If the policy
@@ -309,6 +312,73 @@ func (c *RealCloudflareClient) FindTunnels(ctx context.Context, name string) ([]
 		}
 		params.ResultInfo = info.Next()
 	}
+}
+
+// VerifyAccessPolicy verifies the recorded application and its complete policy surface.
+// It fails closed on extra policies, non-email selectors, exclusions, requirements,
+// or any change to the allowlist. API errors are returned separately from drift.
+func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID, appID, name, domain string, allowedEmails []string) (bool, error) {
+	rc := cloudflare.AccountIdentifier(accountID)
+	app, err := c.api.GetAccessApplication(ctx, rc, appID)
+	if err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting Access application %s: %w", appID, err)
+	}
+	if app.ID != appID || app.Name != name || app.Domain != domain {
+		return false, nil
+	}
+	policies, _, err := c.api.ListAccessPolicies(ctx, rc, cloudflare.ListAccessPoliciesParams{ApplicationID: appID})
+	if err != nil {
+		return false, fmt.Errorf("listing policies for Access application %s: %w", appID, err)
+	}
+	if len(policies) != 1 {
+		return false, nil
+	}
+	policy := policies[0]
+	if policy.Decision != "allow" || len(policy.Exclude) != 0 || len(policy.Require) != 0 {
+		return false, nil
+	}
+	want := make(map[string]struct{}, len(allowedEmails))
+	for _, email := range allowedEmails {
+		want[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
+	}
+	got := make(map[string]struct{}, len(policy.Include))
+	for _, raw := range policy.Include {
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return false, fmt.Errorf("encoding Access policy selector: %w", err)
+		}
+		var selector map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &selector); err != nil {
+			// Malformed selectors are policy drift, not transient API errors.
+			//nolint:nilerr // Deliberately fail closed on malformed policy selectors.
+			return false, nil
+		}
+		if len(selector) != 1 {
+			return false, nil
+		}
+		emailRaw, ok := selector["email"]
+		if !ok {
+			return false, nil
+		}
+		var emailSelector map[string]string
+		if err := json.Unmarshal(emailRaw, &emailSelector); err != nil {
+			// Malformed email selectors are policy drift, not transient API errors.
+			//nolint:nilerr // Deliberately fail closed on malformed policy selectors.
+			return false, nil
+		}
+		if len(emailSelector) != 1 {
+			return false, nil
+		}
+		email := strings.ToLower(strings.TrimSpace(emailSelector["email"]))
+		if _, ok := want[email]; !ok {
+			return false, nil
+		}
+		got[email] = struct{}{}
+	}
+	return len(got) == len(want), nil
 }
 
 // FindAccessApplications lists the Access applications whose name and domain

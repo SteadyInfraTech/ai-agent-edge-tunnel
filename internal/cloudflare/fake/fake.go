@@ -5,6 +5,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
@@ -152,6 +153,32 @@ func (c *Client) FindTunnels(_ context.Context, name string) ([]cloudflare.Tunne
 		}
 	}
 	return out, nil
+}
+
+// VerifyAccessPolicy checks that the recorded application has exactly the requested email allowlist.
+func (c *Client) VerifyAccessPolicy(_ context.Context, _, appID, name, domain string, allowedEmails []string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FindAccessErr != nil {
+		return false, c.FindAccessErr
+	}
+	app, ok := c.AccessApps[appID]
+	if !ok || app.Name != name || app.Domain != domain {
+		return false, nil
+	}
+	want := make(map[string]struct{}, len(allowedEmails))
+	for _, email := range allowedEmails {
+		want[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
+	}
+	got := make(map[string]struct{}, len(app.Emails))
+	for _, email := range app.Emails {
+		email = strings.ToLower(strings.TrimSpace(email))
+		if _, ok := want[email]; !ok {
+			return false, nil
+		}
+		got[email] = struct{}{}
+	}
+	return len(got) == len(want), nil
 }
 
 // FindAccessApplications returns the recorded applications whose name and
