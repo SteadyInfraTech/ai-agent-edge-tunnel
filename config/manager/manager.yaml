@@ -37,7 +37,7 @@ spec:
         #     --from-literal=EDGE_BASE_DOMAIN=agents.example.com \
         #     --from-literal=CLOUDFLARE_ZONE_ID=... \
         #     --from-literal=CLOUDFLARE_ZONE_NAME=example.com \
-        #     --from-literal=CONNECTOR_IMAGE=cloudflare/cloudflared:2026.x.y \\
+        #     --from-literal=CONNECTOR_IMAGE=cloudflare/cloudflared:2026.x.y \
         #     --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public
         # The values are read at startup: after changing the ConfigMap, run
         #   kubectl -n edge-tunnel-system rollout restart deployment/edge-tunnel-controller-manager
