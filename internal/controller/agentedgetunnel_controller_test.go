@@ -382,8 +382,10 @@ func TestCleanupFailureKeepsFinalizerAndRetries(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, h.get().Finalizers, FinalizerName, "must not drop the finalizer while Cloudflare resources remain")
 	assert.Len(t, h.cf.Tunnels, 1)
+	assert.Len(t, h.cf.AccessApps, 1, "Access must remain until tunnel deletion succeeds")
 	// The connector goes first: Cloudflare refuses to delete a tunnel that is
-	// still connected, so stopping it is what lets the retry succeed.
+	// still connected, so stopping it is what lets the retry succeed. Access
+	// protection is retained while the tunnel still exists.
 	h.assertConnectorGone()
 
 	h.cf.DeleteTunnelErr = nil
