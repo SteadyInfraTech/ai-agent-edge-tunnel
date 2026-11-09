@@ -39,10 +39,10 @@ func TestActiveTunnelWithoutAccessAppGetsProtected(t *testing.T) {
 	assert.NotContains(t, h.get().Status.Message, "UNPROTECTED")
 }
 
-// TestActiveTunnelThatLostItsAccessAppIDReadoptsTheApplication checks that an
-// application that still exists in Cloudflare is found again, not duplicated and
-// not deleted (which would leave the live hostname unprotected).
-func TestActiveTunnelThatLostItsAccessAppIDReadoptsTheApplication(t *testing.T) {
+// TestActiveTunnelThatLostItsAccessAppIDLeavesTheApplicationUntouched checks
+// that a matching application is not adopted or deleted without independent
+// ownership evidence, even when it is currently protecting an active hostname.
+func TestActiveTunnelThatLostItsAccessAppIDLeavesTheApplicationUntouched(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
 	require.NoError(t, err)
@@ -54,8 +54,9 @@ func TestActiveTunnelThatLostItsAccessAppIDReadoptsTheApplication(t *testing.T) 
 	require.NoError(t, h.k8s.Status().Update(context.Background(), &cr))
 
 	_, err = h.reconcile()
-	require.NoError(t, err)
-	assert.Equal(t, appID, h.get().Status.AccessAppID)
-	assert.Equal(t, 1, h.cf.CreateAccessCalls, "no second application")
-	assert.Contains(t, h.cf.AccessApps, appID, "the protecting application must never be deleted")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership and policy identity cannot be established")
+	assert.Empty(t, h.get().Status.AccessAppID, "do not adopt an application without ownership proof")
+	assert.Equal(t, 1, h.cf.CreateAccessCalls, "do not create a duplicate application")
+	assert.Contains(t, h.cf.AccessApps, appID, "the protecting application must remain untouched")
 }
