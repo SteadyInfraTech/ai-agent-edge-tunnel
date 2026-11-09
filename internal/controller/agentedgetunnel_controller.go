@@ -367,6 +367,13 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	}
 
 	if err := r.ensureQuotaReservation(ctx, t, t.Status.TunnelID != ""); err != nil {
+		if errors.Is(err, errQuotaExhausted) {
+			t.Status.Phase = agentopsv1alpha1.PhasePending
+			t.Status.Message = err.Error()
+			if statusErr := r.Status().Update(ctx, t); statusErr != nil {
+				return ctrl.Result{}, errors.Join(err, fmt.Errorf("persisting quota exhaustion status: %w", statusErr))
+			}
+		}
 		return ctrl.Result{}, err
 	}
 

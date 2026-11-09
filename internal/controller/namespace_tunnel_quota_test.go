@@ -128,16 +128,27 @@ func TestNamespaceQuotaConcurrentAdmissionsCannotOversubscribe(t *testing.T) {
 		require.NoError(t, h.k8s.Create(context.Background(), tunnel))
 	}
 
+	newReconciler := func() *AgentEdgeTunnelReconciler {
+		return &AgentEdgeTunnelReconciler{
+			Client:           h.k8s,
+			APIReader:        h.k8s,
+			Scheme:           h.r.Scheme,
+			CloudflareClient: h.cf,
+			ZoneID:           "zone",
+			DryRun:           true,
+		}
+	}
+	reconcilers := []*AgentEdgeTunnelReconciler{newReconciler(), newReconciler()}
 	start := make(chan struct{})
 	errs := make(chan error, len(tunnels))
 	var wg sync.WaitGroup
-	for _, tunnel := range tunnels {
+	for i, tunnel := range tunnels {
 		wg.Add(1)
-		go func(tunnel *agentopsv1alpha1.AgentEdgeTunnel) {
+		go func(r *AgentEdgeTunnelReconciler, tunnel *agentopsv1alpha1.AgentEdgeTunnel) {
 			defer wg.Done()
 			<-start
-			errs <- h.r.ensureQuotaReservation(context.Background(), tunnel, false)
-		}(tunnel)
+			errs <- r.ensureQuotaReservation(context.Background(), tunnel, false)
+		}(reconcilers[i], tunnel)
 	}
 	close(start)
 	wg.Wait()

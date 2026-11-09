@@ -110,8 +110,10 @@ Early `v1alpha1`.
 ## Namespace tunnel quotas
 
 Tunnel quotas are opt-in and namespace-scoped. Without a `NamespaceTunnelQuota`
-object, the operator imposes no tunnel-count limit. To cap a namespace at 25
-tunnels, an administrator applies:
+object, the operator imposes no tunnel-count limit. These Kubernetes quotas
+only constrain this operator's admission within a namespace; they do not limit
+Cloudflare account-wide tunnel capacity or Cloudflare API rate limits. To cap a
+namespace at 25 tunnels, an administrator applies:
 
 ```yaml
 apiVersion: edge.steadyinfra.com/v1alpha1

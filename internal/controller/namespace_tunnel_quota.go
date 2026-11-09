@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -12,6 +13,8 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+var errQuotaExhausted = errors.New("namespace tunnel quota exhausted")
 
 // lockQuotaNamespace serializes quota mutations in this process. The API-server
 // resourceVersion check in Status().Update is still required for other replicas.
@@ -88,7 +91,7 @@ func (r *AgentEdgeTunnelReconciler) ensureQuotaReservation(ctx context.Context, 
 		}
 		_, alreadyReserved := reservations[uid]
 		if !alreadyReserved && !existing && int32(len(reservations)) >= quota.Spec.Limit {
-			return fmt.Errorf("namespace tunnel quota exhausted: %d of %d reservations are in use", len(reservations), quota.Spec.Limit)
+			return fmt.Errorf("%w: %d of %d reservations are in use", errQuotaExhausted, len(reservations), quota.Spec.Limit)
 		}
 		reservations[uid] = agentopsv1alpha1.TunnelReservation{Name: t.Name, UID: uid}
 		uids := make([]string, 0, len(reservations))
@@ -146,6 +149,7 @@ func (r *AgentEdgeTunnelReconciler) releaseQuotaReservation(ctx context.Context,
 	})
 }
 
+// containsReservation reports whether the reservation ledger contains a UID.
 func containsReservation(reservations []agentopsv1alpha1.TunnelReservation, uid string) bool {
 	for _, reservation := range reservations {
 		if reservation.UID == uid {

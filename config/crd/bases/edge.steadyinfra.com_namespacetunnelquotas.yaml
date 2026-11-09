@@ -25,6 +25,9 @@ spec:
       openAPIV3Schema:
         type: object
         required: [spec]
+        x-kubernetes-validations:
+        - rule: self.metadata.name == 'default'
+          message: the NamespaceTunnelQuota object must be named 'default'
         properties:
           spec:
             type: object

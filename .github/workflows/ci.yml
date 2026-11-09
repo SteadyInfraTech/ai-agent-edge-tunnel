@@ -31,13 +31,7 @@ jobs:
           git diff --exit-code go.mod go.sum
 
       - name: Check formatting
-        run: |
-          unformatted="$(gofmt -l $(git ls-files '*.go' | grep -v zz_generated))"
-          if [ -n "$unformatted" ]; then
-            echo "Go files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
+        run: test -z "$(gofmt -l $(git ls-files '*.go' | grep -v zz_generated))"
 
       - name: Vet
         run: go vet ./...
