@@ -73,3 +73,23 @@ func TestNamespaceQuotaGrandfathersExistingTunnelsWhenLimitDrops(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name:"new", Namespace:"default", UID:types.UID("33333333-aaaa-bbbb-cccc-444444444444")},
 	}, false), "quota exhausted")
 }
+
+func TestNamespaceQuotaReservationReleasedAfterTerminationCleanup(t *testing.T) {
+	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+	}
+	h := newHarness(t, nil, quota)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Len(t, h.cf.Tunnels, 1)
+
+	tunnel := h.get()
+	require.NoError(t, h.r.terminate(context.Background(), &tunnel, "test termination"))
+
+	var stored agentopsv1alpha1.NamespaceTunnelQuota
+	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace:"default", Name:"default"}, &stored))
+	require.Empty(t, stored.Status.Reservations)
+	require.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	require.Empty(t, h.cf.Tunnels)
+}
