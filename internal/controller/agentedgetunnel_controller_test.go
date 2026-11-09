@@ -742,6 +742,35 @@ func TestOrphanTunnelWithoutItsSecretIsLeftUntouched(t *testing.T) {
 	assert.Empty(t, h.get().Status.TunnelID)
 }
 
+// TestOrphanTunnelWithIncompleteCredentialsIsLeftUntouched checks that a
+// matching tunnel ID is insufficient when the credentials are incomplete.
+func TestOrphanTunnelWithIncompleteCredentialsIsLeftUntouched(t *testing.T) {
+	for _, credentials := range []string{
+		`{"AccountTag":"fake-account","TunnelID":"matching-tunnel"}`,
+		`{"AccountTag":"fake-account","TunnelSecret":"","TunnelID":"matching-tunnel"}`,
+		`{"AccountTag":"another-account","TunnelSecret":"fake-secret","TunnelID":"matching-tunnel"}`,
+	} {
+		t.Run(credentials, func(t *testing.T) {
+			h := orphanTunnel(t, nil)
+			var oldID string
+			for id := range h.cf.Tunnels {
+				oldID = id
+			}
+			sec, err := h.secret()
+			require.NoError(t, err)
+			sec.Data[credentialsKey] = []byte(strings.ReplaceAll(credentials, "matching-tunnel", oldID))
+			require.NoError(t, h.k8s.Update(context.Background(), sec))
+
+			_, err = h.reconcile()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "ownership cannot be established")
+			assert.Contains(t, h.cf.Tunnels, oldID, "the candidate must not be deleted")
+			assert.Equal(t, 1, h.cf.CreateTunnelCalls, "do not create a duplicate while ownership is ambiguous")
+			assert.Empty(t, h.get().Status.TunnelID)
+		})
+	}
+}
+
 // TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsLeftUntouched checks that
 // mismatched credentials do not authorize deletion of the candidate tunnel.
 func TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsLeftUntouched(t *testing.T) {
