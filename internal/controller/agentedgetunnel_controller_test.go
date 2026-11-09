@@ -868,7 +868,6 @@ func TestOneFailingCleanupStepDoesNotBlockTheOthers(t *testing.T) {
 	assert.Empty(t, h.cf.DNSRecords)
 }
 
-
 // failingDeploymentDeleteClient injects a connector Deployment deletion failure.
 type failingDeploymentDeleteClient struct {
 	client.Client
