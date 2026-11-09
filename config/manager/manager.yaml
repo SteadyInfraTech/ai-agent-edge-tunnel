@@ -27,8 +27,8 @@ spec:
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8080
-        # Required: EDGE_BASE_DOMAIN, CLOUDFLARE_ZONE_ID (the one zone this
-        # operator may use), and CONNECTOR_IMAGE (cloudflared, pinned to a version
+        # Required: EDGE_BASE_DOMAIN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_ZONE_NAME
+        # (the zone ID/name pair this operator may use), and CONNECTOR_IMAGE (cloudflared, pinned to a version
         # or digest). EDGE_PUBLIC_NAMESPACES is an optional comma-separated
         # allowlist for security.allowPublic; empty means public tunnels are denied.
         # These values are
