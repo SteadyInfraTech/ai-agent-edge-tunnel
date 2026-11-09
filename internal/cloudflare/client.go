@@ -20,8 +20,8 @@ const DryRunIDPrefix = "dryrun-"
 // IsDryRunID reports whether id was issued by the in-memory fake.
 func IsDryRunID(id string) bool { return strings.HasPrefix(id, DryRunIDPrefix) }
 
-// TunnelInfo describes a tunnel as returned by Cloudflare, including the
-// secret and token, which are only available at creation.
+// TunnelInfo describes a tunnel as returned by Cloudflare. The secret is
+// generated before creation and stored immediately in the connector Secret.
 type TunnelInfo struct {
 	// AccountID is the Cloudflare account that owns the tunnel.
 	AccountID string
@@ -29,7 +29,6 @@ type TunnelInfo struct {
 	Name      string
 	Secret    string
 	Hostname  string
-	Token     string
 }
 
 // TunnelRef identifies an existing tunnel.
@@ -91,8 +90,8 @@ func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient,
 	}, nil
 }
 
-// CreateTunnel creates a locally managed tunnel and returns its ID, credentials
-// and token. Cloudflare returns the secret only once.
+// CreateTunnel creates a locally managed tunnel and returns its ID and
+// credentials. The secret is generated locally and stored only in the connector Secret.
 func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
 	// Generate a cryptographically secure 32-byte secret and base64-encode it
 	secretBytes := make([]byte, 32)
@@ -109,10 +108,6 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 		return nil, fmt.Errorf("cloudflare API tunnel creation failed: %w", err)
 	}
 
-	token, err := c.api.GetTunnelToken(ctx, cloudflare.AccountIdentifier(c.AccountID), tunnel.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch tunnel token: %w", err)
-	}
 
 	return &TunnelInfo{
 		AccountID: c.AccountID,
@@ -120,7 +115,6 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 		Name:      tunnel.Name,
 		Secret:    secret,
 		Hostname:  tunnelTarget(tunnel.ID),
-		Token:     token,
 	}, nil
 }
 
