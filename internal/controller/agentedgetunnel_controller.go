@@ -123,13 +123,21 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
+	// Existing Cloudflare resources must be checked against current operator
+	// policy before reading their AgentSession. A revoked public namespace or
+	// changed zone takes precedence over session state and triggers cleanup.
+	if tunnel.Status.TunnelID != "" {
+		if err := r.validateOperatorPolicy(&tunnel); err != nil {
+			return ctrl.Result{}, r.terminate(ctx, &tunnel, "operator security policy changed; resources removed: "+err.Error())
+		}
+	}
+
 	if res, done, err := r.reconcileSession(ctx, &tunnel); done {
 		return res, err
 	}
 
-	// Enforce operator-wide security boundaries for both new and existing
-	// objects. If an administrator revokes a namespace's public access or
-	// changes the pinned zone, tear down resources created for the old policy.
+	// Keep the policy check for objects without recorded tunnel IDs, before
+	// provisioning can create any Cloudflare resources.
 	if err := r.validateOperatorPolicy(&tunnel); err != nil {
 		if tunnel.Status.TunnelID != "" {
 			return ctrl.Result{}, r.terminate(ctx, &tunnel, "operator security policy changed; resources removed: "+err.Error())
