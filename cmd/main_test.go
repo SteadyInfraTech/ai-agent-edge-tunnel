@@ -15,3 +15,10 @@ func TestNamespaceConfig(t *testing.T) {
 	assert.Contains(t, got, "a")
 	assert.Contains(t, got, "b")
 }
+
+// TestNamespaceSet parses the explicit public-tunnel namespace allowlist.
+func TestNamespaceSet(t *testing.T) {
+	got := namespaceSet(" team-a,team-b, ,team-a ")
+	assert.Equal(t, map[string]struct{}{"team-a": {}, "team-b": {}}, got)
+	assert.Empty(t, namespaceSet(" , "), "an empty allowlist must deny public tunnels everywhere")
+}

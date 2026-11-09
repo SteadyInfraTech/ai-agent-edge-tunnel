@@ -27,13 +27,18 @@ spec:
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8080
-        # Required: EDGE_BASE_DOMAIN (a zone you control in Cloudflare) and
-        # CONNECTOR_IMAGE (cloudflared, pinned to a version or digest). They are
-        # deliberately not set here, so the operator refuses to start rather than
+        # Required: EDGE_BASE_DOMAIN, CLOUDFLARE_ZONE_ID, CLOUDFLARE_ZONE_NAME
+        # (the zone ID/name pair this operator may use), and CONNECTOR_IMAGE (cloudflared, pinned to a version
+        # or digest). EDGE_PUBLIC_NAMESPACES is an optional comma-separated
+        # allowlist for security.allowPublic; empty means public tunnels are denied.
+        # These values are deliberately not set here, so the operator refuses to start rather than
         # guess. Provide them without editing this file:
         #   kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
         #     --from-literal=EDGE_BASE_DOMAIN=agents.example.com \
-        #     --from-literal=CONNECTOR_IMAGE=cloudflare/cloudflared:2026.x.y
+        #     --from-literal=CLOUDFLARE_ZONE_ID=... \
+        #     --from-literal=CLOUDFLARE_ZONE_NAME=example.com \
+        #     --from-literal=CONNECTOR_IMAGE=cloudflare/cloudflared:2026.x.y \
+        #     --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public
         # The values are read at startup: after changing the ConfigMap, run
         #   kubectl -n edge-tunnel-system rollout restart deployment/edge-tunnel-controller-manager
         envFrom:
