@@ -36,6 +36,16 @@ func init() {
 
 // namespaceConfig turns a comma-separated list into the cache's namespace
 // restriction. An empty list returns nil, which means every namespace.
+func namespaceSet(list string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, ns := range strings.Split(list, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			out[ns] = struct{}{}
+		}
+	}
+	return out
+}
+
 func namespaceConfig(list string) map[string]cache.Config {
 	var out map[string]cache.Config
 	for _, ns := range strings.Split(list, ",") {
@@ -60,6 +70,7 @@ func main() {
 		probeAddr      string
 		metricsAddr    string
 		watchNS        string
+		zoneID         string
 	)
 	flag.BoolVar(&dryRun, "dry-run", false,
 		"Use an in-memory fake instead of the Cloudflare API. Nothing is provisioned in Cloudflare; for local development only.")
@@ -87,10 +98,16 @@ func main() {
 		cfClient  cf.TunnelService
 		accountID string
 	)
+	publicNamespaces := namespaceSet(os.Getenv("EDGE_PUBLIC_NAMESPACES"))
 	if dryRun {
 		setupLog.Info("DRY RUN: using an in-memory Cloudflare fake; no real Cloudflare resources will be created")
 		cfClient = fake.New()
 		accountID = "fake-account"
+		zoneID = "fake-zone"
+		if zoneID == "" {
+			setupLog.Error(errors.New("missing Cloudflare zone"), "CLOUDFLARE_ZONE_ID is required to pin the operator to one Cloudflare zone")
+			os.Exit(1)
+		}
 		if baseDomain == "" {
 			baseDomain = "agents.example.invalid"
 		}
@@ -100,6 +117,7 @@ func main() {
 	} else {
 		accountID = os.Getenv("CLOUDFLARE_ACCOUNT_ID")
 		apiToken := os.Getenv("CLOUDFLARE_API_TOKEN")
+		zoneID = os.Getenv("CLOUDFLARE_ZONE_ID")
 		if accountID == "" || apiToken == "" {
 			setupLog.Error(errors.New("missing credentials"),
 				"CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required (use --dry-run for local development)")
@@ -150,6 +168,8 @@ func main() {
 		Scheme:           mgr.GetScheme(),
 		CloudflareClient: cfClient,
 		AccountID:        accountID,
+		ZoneID:           zoneID,
+		PublicNamespaces: publicNamespaces,
 		BaseDomain:       baseDomain,
 		ConnectorImage:   connectorImage,
 		DryRun:           dryRun,
@@ -167,7 +187,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting manager for ai-agent-edge-tunnel", "baseDomain", baseDomain, "connectorImage", connectorImage, "leaderElection", leaderElect, "watchNamespaces", watchNS)
+	setupLog.Info("Starting manager for ai-agent-edge-tunnel", "baseDomain", baseDomain, "connectorImage", connectorImage, "leaderElection", leaderElect, "watchNamespaces", watchNS, "publicNamespaces", len(publicNamespaces), "zoneID", zoneID)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
