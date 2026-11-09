@@ -53,6 +53,8 @@ const (
 // AgentEdgeTunnelReconciler reconciles an AgentEdgeTunnel object
 type AgentEdgeTunnelReconciler struct {
 	client.Client
+	// APIReader bypasses the cache for quota reservation compare-and-swap retries.
+	APIReader client.Reader
 	Scheme           *runtime.Scheme
 	CloudflareClient cf.TunnelService
 	// AccountID is the Cloudflare account used for Access applications.
@@ -87,6 +89,8 @@ func (r *AgentEdgeTunnelReconciler) now() time.Time {
 // the Cloudflare resources, enforces the TTL, and cleans up on deletion.
 //
 // +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=namespacetunnelquotas,verbs=get;list;watch
+// +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=namespacetunnelquotas/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.steadyinfra.com,resources=agentsessions,verbs=get
@@ -121,6 +125,12 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.patchFinalizers(ctx, &tunnel, orig); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// Account for already-provisioned tunnels before enforcing a newly-created
+	// namespace quota. Existing tunnels are grandfathered if the limit is lower.
+	if tunnel.Status.TunnelID != "" {
+		if err := r.ensureQuotaReservation(ctx, &tunnel, true); err != nil { return ctrl.Result{}, err }
 	}
 
 	// Existing Cloudflare resources must be checked against current operator
@@ -216,6 +226,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 	if err := r.cleanup(ctx, t); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleaning up Cloudflare resources: %w", err)
 	}
+	if err := r.releaseQuotaReservation(ctx, t); err != nil { return ctrl.Result{}, fmt.Errorf("releasing namespace quota reservation: %w", err) }
 	orig := t.DeepCopy()
 	controllerutil.RemoveFinalizer(t, FinalizerName)
 	return ctrl.Result{}, r.patchFinalizers(ctx, t, orig)
@@ -292,6 +303,7 @@ func (r *AgentEdgeTunnelReconciler) terminate(ctx context.Context, t *agentopsv1
 	if err := r.cleanup(ctx, t); err != nil {
 		return fmt.Errorf("cleaning up: %w", err)
 	}
+	if err := r.releaseQuotaReservation(ctx, t); err != nil { return fmt.Errorf("releasing namespace quota reservation: %w", err) }
 	t.Status.Phase = agentopsv1alpha1.PhaseTerminated
 	t.Status.Message = message
 	t.Status.TunnelID = ""
@@ -320,6 +332,8 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		t.Status.Message = err.Error()
 		return ctrl.Result{}, r.Status().Update(ctx, t)
 	}
+
+	if err := r.ensureQuotaReservation(ctx, t, t.Status.TunnelID != ""); err != nil { return ctrl.Result{}, err }
 
 	if t.Status.TunnelID == "" {
 		// A Secret we cannot use would fail every attempt after the tunnel was
