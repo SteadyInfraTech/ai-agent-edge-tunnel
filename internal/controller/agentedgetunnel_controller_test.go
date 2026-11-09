@@ -867,3 +867,44 @@ func TestOneFailingCleanupStepDoesNotBlockTheOthers(t *testing.T) {
 	require.NoError(t, err, "the retry must still find the IDs and finish")
 	assert.Empty(t, h.cf.DNSRecords)
 }
+
+
+// failingDeploymentDeleteClient injects a connector Deployment deletion failure.
+type failingDeploymentDeleteClient struct {
+	client.Client
+	err error
+}
+
+func (c *failingDeploymentDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if _, ok := obj.(*appsv1.Deployment); ok {
+		return c.err
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+// TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
+// application remains in place while the connector prevents tunnel deletion.
+func TestConnectorRemovalFailureRetainsAccessApplication(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Len(t, h.cf.Tunnels, 1)
+	require.Len(t, h.cf.AccessApps, 1)
+
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+	h.r.Client = &failingDeploymentDeleteClient{Client: h.k8s, err: errors.New("deployment deletion blocked")}
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "removing connector")
+	assert.Len(t, h.cf.Tunnels, 1, "tunnel deletion must be skipped while connector removal fails")
+	assert.Len(t, h.cf.AccessApps, 1, "Access must remain while its tunnel still exists")
+	assert.Contains(t, h.get().Finalizers, FinalizerName)
+
+	h.r.Client = h.k8s
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.AccessApps)
+}
