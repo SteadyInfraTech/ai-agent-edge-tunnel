@@ -194,7 +194,7 @@ removes the manager and the CRD, so nothing is left running in Cloudflare.
    export CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
    export CLOUDFLARE_ACCOUNT_ID="your-cloudflare-account-id"
    export CLOUDFLARE_ZONE_ID="your-cloudflare-zone-id"
-   export CLOUDFLARE_TEST_HOSTNAME="ci-test.agents.example.com"  # optional; enables the DNS part
+   export CLOUDFLARE_TEST_HOSTNAME="ci-test.agents.example.com"  # optional locally; required by the GitHub live job for DNS coverage
    go test -v ./internal/cloudflare/ -run TestLiveCloudflareTunnel
    ```
 
