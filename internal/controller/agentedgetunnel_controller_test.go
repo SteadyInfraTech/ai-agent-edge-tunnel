@@ -779,7 +779,8 @@ func TestOrphanTunnelWithUncontrolledMatchingSecretIsLeftUntouched(t *testing.T)
 
 	// Exercise credentialsMatch directly: reconcile rejects this unmanaged
 	// Secret earlier in checkConnectorSecretFree.
-	ok, err := h.r.credentialsMatch(context.Background(), h.get(), oldID)
+	tunnel := h.get()
+	ok, err := h.r.credentialsMatch(context.Background(), &tunnel, oldID)
 	require.NoError(t, err)
 	assert.False(t, ok, "matching credentials in an uncontrolled Secret are not ownership evidence")
 
