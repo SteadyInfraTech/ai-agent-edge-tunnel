@@ -748,7 +748,8 @@ func TestOrphanTunnelWithIncompleteCredentialsIsLeftUntouched(t *testing.T) {
 	for _, credentials := range []string{
 		`{"AccountTag":"fake-account","TunnelID":"matching-tunnel"}`,
 		`{"AccountTag":"fake-account","TunnelSecret":"","TunnelID":"matching-tunnel"}`,
-		`{"AccountTag":"another-account","TunnelSecret":"fake-secret","TunnelID":"matching-tunnel"}`,
+		`{"AccountTag":"fake-account","TunnelSecret":"not-base64","TunnelID":"matching-tunnel"}`,
+		`{"AccountTag":"another-account","TunnelSecret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","TunnelID":"matching-tunnel"}`,
 	} {
 		t.Run(credentials, func(t *testing.T) {
 			h := orphanTunnel(t, nil)
