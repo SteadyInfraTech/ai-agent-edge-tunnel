@@ -253,8 +253,7 @@ func TestActiveSessionTunnelRequeuesAtThePollInterval(t *testing.T) {
 	assert.Equal(t, sessionPollInterval, res.RequeueAfter)
 }
 
-
- // TestSessionPolicyRevocationPrecedesSessionRead verifies that operator
+// TestSessionPolicyRevocationPrecedesSessionRead verifies that operator
  // policy revocation cleans up a provisioned tunnel before session state is
  // consulted, even if the referenced session has independently ended.
 func TestSessionPolicyRevocationPrecedesSessionRead(t *testing.T) {
@@ -262,7 +261,7 @@ func TestSessionPolicyRevocationPrecedesSessionRead(t *testing.T) {
 	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
 	cr := h.get()
 	cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
-	require.NoError(t, h.k8s.Update(context.Background(), &cr))
+	require.NoError(t, h.k8s.Update(context.Background(), cr))
 
 	_, err := h.reconcile()
 	require.NoError(t, err)
