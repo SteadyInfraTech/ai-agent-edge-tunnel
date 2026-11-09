@@ -445,7 +445,7 @@ func (r *AgentEdgeTunnelReconciler) recoverTunnel(ctx context.Context, t *agento
 		return nil, fmt.Errorf("verifying ownership of Cloudflare tunnel %s: %w", ref.ID, err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("Cloudflare tunnel %q (%s) matches this AgentEdgeTunnel's name, but ownership cannot be established; leave it untouched and resolve it manually", ref.Name, ref.ID)
+		return nil, fmt.Errorf("cloudflare tunnel %q (%s) matches this AgentEdgeTunnel's name, but ownership cannot be established; leave it untouched and resolve it manually", ref.Name, ref.ID)
 	}
 	return &ref, nil
 }
@@ -469,6 +469,8 @@ func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *age
 	}
 	var creds struct{ TunnelID string }
 	if err := json.Unmarshal(s.Data[credentialsKey], &creds); err != nil {
+		// Malformed credentials provide no ownership evidence; this is not a reconcile error.
+		//nolint:nilerr // Deliberately treat malformed credentials as an ownership mismatch.
 		return false, nil
 	}
 	return creds.TunnelID == tunnelID, nil
