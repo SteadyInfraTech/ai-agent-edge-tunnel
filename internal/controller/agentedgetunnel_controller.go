@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -477,9 +478,11 @@ func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *age
 		//nolint:nilerr // Deliberately treat malformed credentials as an ownership mismatch.
 		return false, nil
 	}
-	return creds.AccountTag == r.AccountID &&
-		creds.TunnelSecret != "" &&
-		creds.TunnelID == tunnelID, nil
+	secret, err := base64.StdEncoding.DecodeString(creds.TunnelSecret)
+	if err != nil || len(secret) != 32 {
+		return false, nil
+	}
+	return creds.AccountTag == r.AccountID && creds.TunnelID == tunnelID, nil
 }
 
 // discardTunnel removes a tunnel whose ID could not be recorded.
