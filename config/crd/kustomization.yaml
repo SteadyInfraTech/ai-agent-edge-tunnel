@@ -1,2 +1,3 @@
 resources:
 - bases/edge.steadyinfra.com_agentedgetunnels.yaml
+- bases/edge.steadyinfra.com_namespacetunnelquotas.yaml
