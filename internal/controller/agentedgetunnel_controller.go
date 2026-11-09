@@ -536,10 +536,9 @@ func (r *AgentEdgeTunnelReconciler) recoverAccessApp(ctx context.Context, t *age
 
 // cleanup removes everything the tunnel created. The connector goes first,
 // because Cloudflare will not delete a tunnel that still has live connections.
-// After that the DNS record, the Access application and the tunnel are
-// independent of one another, so each is attempted even when another fails: one
-// stuck resource (a zone that no longer exists, say) must not keep the others
-// alive in Cloudflare. All failures are returned together so the finalizer stays
+// DNS cleanup is independent, but the Access application is retained until
+// the tunnel has been deleted successfully. A failed connector removal skips
+// tunnel and Access deletion. All failures are returned together so the finalizer stays
 // until everything is gone, and the IDs stay in status so a retry finds what is
 // left. Every step is idempotent.
 func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
