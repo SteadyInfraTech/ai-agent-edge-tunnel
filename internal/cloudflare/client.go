@@ -107,7 +107,6 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare API tunnel creation failed: %w", err)
 	}
-
 	return &TunnelInfo{
 		AccountID: c.AccountID,
 		ID:        tunnel.ID,
