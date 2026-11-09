@@ -235,18 +235,24 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 	// Clear the recorded IDs before releasing the reservation. Otherwise a
 	// concurrent admission scan could see the still-present deleting object
 	// and re-add its reservation after cleanup has already completed.
-	t.Status.TunnelID = ""
-	t.Status.AccessAppID = ""
-	t.Status.ConnectorReady = false
-	if err := r.Status().Update(ctx, t); err != nil {
-		return ctrl.Result{}, err
+	if t.Status.TunnelID != "" || t.Status.AccessAppID != "" || t.Status.ConnectorReady {
+		t.Status.TunnelID = ""
+		t.Status.AccessAppID = ""
+		t.Status.ConnectorReady = false
+		if err := r.Status().Update(ctx, t); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if err := r.releaseQuotaReservation(ctx, t); err != nil {
 		return ctrl.Result{}, fmt.Errorf("releasing namespace quota reservation: %w", err)
 	}
-	orig := t.DeepCopy()
-	controllerutil.RemoveFinalizer(t, FinalizerName)
-	return ctrl.Result{}, r.patchFinalizers(ctx, t, orig)
+	var latest agentopsv1alpha1.AgentEdgeTunnel
+	if err := r.quotaReader().Get(ctx, client.ObjectKeyFromObject(t), &latest); err != nil {
+		return ctrl.Result{}, err
+	}
+	orig := latest.DeepCopy()
+	controllerutil.RemoveFinalizer(&latest, FinalizerName)
+	return ctrl.Result{}, r.patchFinalizers(ctx, &latest, orig)
 }
 
 // patchFinalizers writes only the finalizer change. A typed Update would send
