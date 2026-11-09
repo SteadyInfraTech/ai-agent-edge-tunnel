@@ -1082,3 +1082,33 @@ func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+
+// TestActiveTunnelKeepsResourcesWhenAccessVerificationFails verifies that a
+// transient Cloudflare API error is not mistaken for confirmed policy drift.
+func TestActiveTunnelKeepsResourcesWhenAccessVerificationFails(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+
+	active := h.get()
+	require.NotEmpty(t, active.Status.TunnelID)
+	require.NotEmpty(t, active.Status.AccessAppID)
+	require.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
+	require.Len(t, h.cf.Tunnels, 1)
+	require.Len(t, h.cf.AccessApps, 1)
+
+	h.cf.FindAccessErr = errors.New("Cloudflare API temporarily unavailable")
+	_, err = h.reconcile()
+	require.Error(t, err)
+
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
+	assert.True(t, strings.HasPrefix(got.Status.Message, "UNPROTECTED:"), "message should explain that policy verification failed")
+	assert.Equal(t, map[string]string{active.Status.Hostname: active.Status.TunnelID}, h.cf.DNSRecords)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+	assert.Len(t, h.cf.Tunnels, 1)
+	assert.Contains(t, h.cf.AccessApps, active.Status.AccessAppID)
+	assert.Len(t, h.cf.AccessApps, 1)
+}

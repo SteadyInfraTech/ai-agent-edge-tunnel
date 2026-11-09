@@ -440,6 +440,9 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	}
 
 	if err := r.ensureAccess(ctx, t); err != nil {
+		if errors.Is(err, errAccessPolicyDrift) {
+			return ctrl.Result{}, r.terminate(ctx, t, "Cloudflare Access policy drift detected; tunnel removed to fail closed")
+		}
 		return r.fail(ctx, t, err)
 	}
 

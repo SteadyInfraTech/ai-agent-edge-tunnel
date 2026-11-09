@@ -5,6 +5,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
@@ -162,23 +163,22 @@ func (c *Client) VerifyAccessPolicy(_ context.Context, _, appID, name, domain st
 		return false, c.FindAccessErr
 	}
 	app, ok := c.AccessApps[appID]
-	if !ok || app.Name != name || app.Domain != domain || len(app.Emails) != len(allowedEmails) {
+	if !ok || app.Name != name || app.Domain != domain {
 		return false, nil
 	}
 	want := make(map[string]struct{}, len(allowedEmails))
 	for _, email := range allowedEmails {
-		want[email] = struct{}{}
+		want[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
 	}
-	if len(want) != len(allowedEmails) {
-		return false, nil
-	}
+	got := make(map[string]struct{}, len(app.Emails))
 	for _, email := range app.Emails {
+		email = strings.ToLower(strings.TrimSpace(email))
 		if _, ok := want[email]; !ok {
 			return false, nil
 		}
-		delete(want, email)
+		got[email] = struct{}{}
 	}
-	return len(want) == 0, nil
+	return len(got) == len(want), nil
 }
 
 // FindAccessApplications returns the recorded applications whose name and

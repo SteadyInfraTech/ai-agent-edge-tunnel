@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"strconv"
 	"testing"
 	"time"
@@ -131,5 +134,93 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 		// Creating again must be a no-op, not an error.
 		require.NoError(t, client.CreateDNSRecord(ctx, zoneID, hostname, info.ID))
 		assert.NoError(t, client.DeleteDNSRecord(ctx, zoneID, hostname, info.ID))
+	}
+}
+
+
+// TestRealVerifyAccessPolicy verifies the complete policy surface through the
+// Cloudflare SDK and a local HTTP server, without live credentials.
+func TestRealVerifyAccessPolicy(t *testing.T) {
+	const (
+		accountID = "account-id"
+		appID     = "app-id"
+		appName   = "agent-test"
+		domain    = "agent.example.com"
+	)
+	validPolicy := `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[],"require":[]}]`
+	tests := []struct {
+		name          string
+		appStatus     int
+		policies      string
+		allowedEmails []string
+		wantMatch     bool
+	}{
+		{
+			name:          "exact email allowlist",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			wantMatch:     true,
+		},
+		{
+			name:     "duplicate normalized emails are treated as sets",
+			policies: `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}},{"email":{"email":" DEV@example.com "}}],"exclude":[],"require":[]}]`,
+			allowedEmails: []string{"dev@example.com", " DEV@example.com "},
+			wantMatch:     true,
+		},
+		{
+			name:          "extra policies",
+			policies:      `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[],"require":[]},{"id":"policy-2","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[],"require":[]}]`,
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "exclusions",
+			policies:      `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[{"ip":{"ip":"192.0.2.1"}}],"require":[]}]`,
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "requirements",
+			policies:      `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[],"require":[{"geo":{"country_code":"US"}}]}]`,
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "non-email selector",
+			policies:      `[{"id":"policy-1","decision":"allow","include":[{"group":{"id":"group-id"}}],"exclude":[],"require":[]}]`,
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "application not found",
+			appStatus:     http.StatusNotFound,
+			allowedEmails: []string{"dev@example.com"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID):
+					if tt.appStatus == http.StatusNotFound {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1003,"message":"not found"}],"messages":[]}`)
+						return
+					}
+					_, _ = fmt.Fprintf(w, `{"success":true,"result":{"id":%q,"name":%q,"domain":%q}}`, appID, appName, domain)
+				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID+"/policies"):
+					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s,"result_info":{"page":1,"per_page":100,"count":1,"total_count":1,"total_pages":1}}`, tt.policies)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			api, err := cloudflare.NewWithAPIToken("test-token")
+			require.NoError(t, err)
+			api.BaseURL = server.URL + "/client/v4"
+			client := &RealCloudflareClient{AccountID: accountID, api: api}
+
+			matches, err := client.VerifyAccessPolicy(context.Background(), accountID, appID, appName, domain, tt.allowedEmails)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantMatch, matches)
+		})
 	}
 }

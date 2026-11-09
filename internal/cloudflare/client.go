@@ -337,16 +337,14 @@ func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID
 		return false, nil
 	}
 	policy := policies[0]
-	if policy.Decision != "allow" || len(policy.Include) != len(allowedEmails) || len(policy.Exclude) != 0 || len(policy.Require) != 0 {
+	if policy.Decision != "allow" || len(policy.Exclude) != 0 || len(policy.Require) != 0 {
 		return false, nil
 	}
 	want := make(map[string]struct{}, len(allowedEmails))
 	for _, email := range allowedEmails {
 		want[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
 	}
-	if len(want) != len(allowedEmails) {
-		return false, nil
-	}
+	got := make(map[string]struct{}, len(policy.Include))
 	for _, raw := range policy.Include {
 		encoded, err := json.Marshal(raw)
 		if err != nil {
@@ -368,9 +366,9 @@ func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID
 		if _, ok := want[email]; !ok {
 			return false, nil
 		}
-		delete(want, email)
+		got[email] = struct{}{}
 	}
-	return len(want) == 0, nil
+	return len(got) == len(want), nil
 }
 
 // FindAccessApplications lists the Access applications whose name and domain
