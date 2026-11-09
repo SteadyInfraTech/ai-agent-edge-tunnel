@@ -1041,7 +1041,6 @@ func TestPublicNamespaceAllowlistUsesExactNames(t *testing.T) {
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
-
 // TestAccessPolicyDriftTerminatesTunnelFailsClosed verifies that externally
 // deleted or modified Access policies cannot leave an Active hostname routed.
 func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
