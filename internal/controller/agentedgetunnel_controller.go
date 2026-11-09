@@ -480,6 +480,8 @@ func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *age
 	}
 	secret, err := base64.StdEncoding.DecodeString(creds.TunnelSecret)
 	if err != nil || len(secret) != 32 {
+		// Invalid tunnel secrets are absent ownership evidence, not a reconcile error.
+		//nolint:nilerr // Deliberately treat invalid secrets as an ownership mismatch.
 		return false, nil
 	}
 	return creds.AccountTag == r.AccountID && creds.TunnelID == tunnelID, nil
