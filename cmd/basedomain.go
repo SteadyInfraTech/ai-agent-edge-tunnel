@@ -24,3 +24,21 @@ func validateBaseDomain(d string) error {
 	}
 	return nil
 }
+
+// validateBaseDomainInZone ensures generated hostnames stay inside the
+// Cloudflare zone configured alongside its ID. The ID/name pair is an
+// administrator-supplied trust anchor; DNS operations still use the pinned ID.
+func validateBaseDomainInZone(baseDomain, zoneName string) error {
+	baseDomain = strings.TrimPrefix(baseDomain, ".")
+	zoneName = strings.TrimPrefix(zoneName, ".")
+	if err := validateBaseDomain(zoneName); err != nil {
+		return fmt.Errorf("invalid Cloudflare zone name %q: %w", zoneName, err)
+	}
+	if err := validateBaseDomain(baseDomain); err != nil {
+		return err
+	}
+	if baseDomain != zoneName && !strings.HasSuffix(baseDomain, "."+zoneName) {
+		return fmt.Errorf("base domain %q is not the configured Cloudflare zone %q or one of its subdomains", baseDomain, zoneName)
+	}
+	return nil
+}
