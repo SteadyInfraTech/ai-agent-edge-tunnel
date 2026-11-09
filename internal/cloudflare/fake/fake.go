@@ -154,6 +154,33 @@ func (c *Client) FindTunnels(_ context.Context, name string) ([]cloudflare.Tunne
 	return out, nil
 }
 
+// VerifyAccessPolicy checks that the recorded application has exactly the requested email allowlist.
+func (c *Client) VerifyAccessPolicy(_ context.Context, _, appID, name, domain string, allowedEmails []string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FindAccessErr != nil {
+		return false, c.FindAccessErr
+	}
+	app, ok := c.AccessApps[appID]
+	if !ok || app.Name != name || app.Domain != domain || len(app.Emails) != len(allowedEmails) {
+		return false, nil
+	}
+	want := make(map[string]struct{}, len(allowedEmails))
+	for _, email := range allowedEmails {
+		want[email] = struct{}{}
+	}
+	if len(want) != len(allowedEmails) {
+		return false, nil
+	}
+	for _, email := range app.Emails {
+		if _, ok := want[email]; !ok {
+			return false, nil
+		}
+		delete(want, email)
+	}
+	return len(want) == 0, nil
+}
+
 // FindAccessApplications returns the recorded applications whose name and
 // domain match. An application with no emails has no allow policy.
 func (c *Client) FindAccessApplications(_ context.Context, _, name, domain string) ([]cloudflare.AccessAppRef, error) {

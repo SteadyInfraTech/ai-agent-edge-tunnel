@@ -29,6 +29,8 @@ import (
 	cf "github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
 )
 
+var errAccessPolicyDrift = errors.New("Cloudflare Access policy drift detected")
+
 const (
 	// FinalizerName blocks deletion of an AgentEdgeTunnel until its Cloudflare
 	// resources are gone.
@@ -283,9 +285,14 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 	// under an older operator) is already reachable. Create the policy now and
 	// say so loudly until it exists.
 	if err := r.ensureAccess(ctx, t); err != nil {
-		t.Status.Message = "UNPROTECTED: no Access policy yet: " + err.Error()
+		if errors.Is(err, errAccessPolicyDrift) {
+			// A weakened or missing policy must never leave an Active hostname routable.
+			// Cleanup removes DNS first and retains the finalizer/status IDs on failure.
+			return ctrl.Result{}, r.terminate(ctx, t, "Cloudflare Access policy drift detected; tunnel removed to fail closed")
+		}
+		t.Status.Message = "UNPROTECTED: unable to verify Access policy: " + err.Error()
 		if uerr := r.Status().Update(ctx, t); uerr != nil {
-			log.FromContext(ctx).Error(uerr, "Failed to record missing Access policy in status")
+			log.FromContext(ctx).Error(uerr, "Failed to record Access policy verification error in status")
 		}
 		return ctrl.Result{}, fmt.Errorf("protecting active tunnel: %w", err)
 	}
@@ -577,7 +584,17 @@ func (r *AgentEdgeTunnelReconciler) discardTunnel(ctx context.Context, tunnelID 
 // recorded immediately so cleanup can find it.
 func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
 	emails := t.Spec.Security.AllowedEmails
-	if len(emails) == 0 || t.Status.AccessAppID != "" {
+	if len(emails) == 0 {
+		return nil
+	}
+	if t.Status.AccessAppID != "" {
+		matches, err := r.CloudflareClient.VerifyAccessPolicy(ctx, r.AccountID, t.Status.AccessAppID, tunnelName(t), t.Status.Hostname, emails)
+		if err != nil {
+			return fmt.Errorf("verifying recorded Access application: %w", err)
+		}
+		if !matches {
+			return fmt.Errorf("%w: application %s for %s is missing or no longer matches the configured allowlist", errAccessPolicyDrift, t.Status.AccessAppID, t.Status.Hostname)
+		}
 		return nil
 	}
 	appID, err := r.recoverAccessApp(ctx, t)
