@@ -71,6 +71,7 @@ func main() {
 		metricsAddr    string
 		watchNS        string
 		zoneID         string
+		zoneName       string
 	)
 	flag.BoolVar(&dryRun, "dry-run", false,
 		"Use an in-memory fake instead of the Cloudflare API. Nothing is provisioned in Cloudflare; for local development only.")
@@ -104,6 +105,7 @@ func main() {
 		cfClient = fake.New()
 		accountID = "fake-account"
 		zoneID = "fake-zone"
+		zoneName = "example.invalid"
 		if baseDomain == "" {
 			baseDomain = "agents.example.invalid"
 		}
@@ -114,13 +116,14 @@ func main() {
 		accountID = os.Getenv("CLOUDFLARE_ACCOUNT_ID")
 		apiToken := os.Getenv("CLOUDFLARE_API_TOKEN")
 		zoneID = os.Getenv("CLOUDFLARE_ZONE_ID")
+		zoneName = os.Getenv("CLOUDFLARE_ZONE_NAME")
 		if accountID == "" || apiToken == "" {
 			setupLog.Error(errors.New("missing credentials"),
 				"CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required (use --dry-run for local development)")
 			os.Exit(1)
 		}
-		if zoneID == "" {
-			setupLog.Error(errors.New("missing Cloudflare zone"), "CLOUDFLARE_ZONE_ID is required to pin the operator to one Cloudflare zone")
+		if zoneID == "" || zoneName == "" {
+			setupLog.Error(errors.New("missing Cloudflare zone configuration"), "CLOUDFLARE_ZONE_ID and CLOUDFLARE_ZONE_NAME are required to pin the operator to one Cloudflare zone")
 			os.Exit(1)
 		}
 		if baseDomain == "" {
@@ -139,8 +142,8 @@ func main() {
 		cfClient = realClient
 	}
 
-	if err := validateBaseDomain(baseDomain); err != nil {
-		setupLog.Error(err, "invalid --base-domain / EDGE_BASE_DOMAIN")
+	if err := validateBaseDomainInZone(baseDomain, zoneName); err != nil {
+		setupLog.Error(err, "invalid --base-domain / EDGE_BASE_DOMAIN for configured Cloudflare zone")
 		os.Exit(1)
 	}
 
