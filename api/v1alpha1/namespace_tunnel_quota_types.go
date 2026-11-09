@@ -43,6 +43,7 @@ type NamespaceTunnelQuotaList struct {
 	Items           []NamespaceTunnelQuota `json:"items"`
 }
 
+// init registers the namespace quota API types with the scheme builder.
 func init() {
 	SchemeBuilder.Register(&NamespaceTunnelQuota{}, &NamespaceTunnelQuotaList{})
 }

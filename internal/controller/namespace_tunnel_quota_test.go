@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// TestNamespaceQuotaAbsentMeansUnlimited verifies that namespaces without a quota remain unrestricted.
 func TestNamespaceQuotaAbsentMeansUnlimited(t *testing.T) {
 	h := newHarness(t, nil)
 	tunnel := h.get()
@@ -22,6 +23,7 @@ func TestNamespaceQuotaAbsentMeansUnlimited(t *testing.T) {
 	require.Equal(t, 1, h.cf.CreateTunnelCalls)
 }
 
+// TestNamespaceQuotaRejectsAdmissionBeforeCloudflareCreate verifies rejection happens before Cloudflare provisioning.
 func TestNamespaceQuotaRejectsAdmissionBeforeCloudflareCreate(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
@@ -34,6 +36,7 @@ func TestNamespaceQuotaRejectsAdmissionBeforeCloudflareCreate(t *testing.T) {
 	require.Zero(t, h.cf.CreateAccessCalls)
 }
 
+// TestNamespaceQuotaAdmissionIsIdempotentAndReleased verifies retries reuse reservations and cleanup frees capacity.
 func TestNamespaceQuotaAdmissionIsIdempotentAndReleased(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
@@ -60,6 +63,7 @@ func TestNamespaceQuotaAdmissionIsIdempotentAndReleased(t *testing.T) {
 	require.Equal(t, string(second.UID), stored.Status.Reservations[0].UID)
 }
 
+// TestNamespaceQuotaGrandfathersExistingTunnelsWhenLimitDrops verifies existing tunnels survive a reduced limit.
 func TestNamespaceQuotaGrandfathersExistingTunnelsWhenLimitDrops(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
@@ -76,6 +80,7 @@ func TestNamespaceQuotaGrandfathersExistingTunnelsWhenLimitDrops(t *testing.T) {
 	}, false), "quota exhausted")
 }
 
+// TestNamespaceQuotaReservationReleasedAfterTerminationCleanup verifies cleanup releases its reserved slot.
 func TestNamespaceQuotaReservationReleasedAfterTerminationCleanup(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
@@ -96,6 +101,7 @@ func TestNamespaceQuotaReservationReleasedAfterTerminationCleanup(t *testing.T) 
 	require.Empty(t, h.cf.Tunnels)
 }
 
+// TestNamespaceQuotaPrunesReservationsForDeletedObjects verifies stale UIDs do not consume quota capacity.
 func TestNamespaceQuotaPrunesReservationsForDeletedObjects(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
@@ -114,6 +120,7 @@ func TestNamespaceQuotaPrunesReservationsForDeletedObjects(t *testing.T) {
 	require.Equal(t, string(tunnel.UID), stored.Status.Reservations[0].UID)
 }
 
+// TestNamespaceQuotaConcurrentAdmissionsCannotOversubscribe verifies separate reconcilers cannot exceed the limit.
 func TestNamespaceQuotaConcurrentAdmissionsCannotOversubscribe(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
