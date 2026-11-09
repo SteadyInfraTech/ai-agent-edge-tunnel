@@ -91,6 +91,8 @@ func TestNamespaceQuotaEnvtest(t *testing.T) {
 	// (a) Two independent reconcilers race for one slot. The barrier guarantees
 	// both read the same quota resourceVersion before either writes status.
 	createNamespace("quota-race")
+	invalidQuota := &agentopsv1alpha1.NamespaceTunnelQuota{ObjectMeta: metav1.ObjectMeta{Name: "not-default", Namespace: "quota-race"}, Spec: agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1}}
+	require.Error(t, k8s.Create(ctx, invalidQuota), "the CRD must reject non-default quota names")
 	createQuota("quota-race", 1)
 	raceTunnels := []*agentopsv1alpha1.AgentEdgeTunnel{
 		createTunnel("quota-race", "concurrent-a"),
@@ -115,6 +117,8 @@ func TestNamespaceQuotaEnvtest(t *testing.T) {
 		select {
 		case <-barrier.arrivals:
 		case <-time.After(30 * time.Second):
+			close(release)
+			wg.Wait()
 			t.Fatal("timed out waiting for both callers to read the same quota resourceVersion")
 		}
 	}

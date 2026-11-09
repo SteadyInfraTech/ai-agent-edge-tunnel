@@ -2,7 +2,7 @@ package controller
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"sync"
 	"testing"
 
@@ -31,7 +31,10 @@ func TestNamespaceQuotaRejectsAdmissionBeforeCloudflareCreate(t *testing.T) {
 	}
 	h := newHarness(t, nil, quota)
 	_, err := h.reconcile()
-	require.ErrorContains(t, err, "quota exhausted")
+	require.ErrorIs(t, err, errQuotaExhausted)
+	got := h.get()
+	require.Equal(t, agentopsv1alpha1.PhasePending, got.Status.Phase)
+	require.Contains(t, got.Status.Message, "namespace tunnel quota exhausted")
 	require.Zero(t, h.cf.CreateTunnelCalls, "quota must be checked before creating Cloudflare resources")
 	require.Zero(t, h.cf.CreateAccessCalls)
 }
@@ -166,7 +169,7 @@ func TestNamespaceQuotaConcurrentAdmissionsCannotOversubscribe(t *testing.T) {
 		if err == nil {
 			admitted++
 		} else {
-			require.True(t, strings.Contains(err.Error(), "quota exhausted"), "unexpected admission error: %v", err)
+			require.True(t, errors.Is(err, errQuotaExhausted), "unexpected admission error: %v", err)
 			rejected++
 		}
 	}

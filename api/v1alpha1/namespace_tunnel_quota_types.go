@@ -13,8 +13,10 @@ type NamespaceTunnelQuotaSpec struct {
 // TunnelReservation records one AgentEdgeTunnel UID. UIDs, rather than names,
 // prevent a deleted-and-recreated object from inheriting an old reservation.
 type TunnelReservation struct {
+	// Name is the AgentEdgeTunnel name associated with this reservation.
 	Name string `json:"name"`
-	UID  string `json:"uid"`
+	// UID uniquely identifies the AgentEdgeTunnel across deletion and recreation.
+	UID string `json:"uid"`
 }
 
 // NamespaceTunnelQuotaStatus is maintained exclusively by the operator.
@@ -29,18 +31,23 @@ type NamespaceTunnelQuotaStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Limit",type=integer,JSONPath=`.spec.limit`
+// NamespaceTunnelQuota is the per-namespace limit and reservation ledger.
 type NamespaceTunnelQuota struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              NamespaceTunnelQuotaSpec   `json:"spec,omitempty"`
-	Status            NamespaceTunnelQuotaStatus `json:"status,omitempty"`
+	// Spec defines the maximum number of admitted tunnels in this namespace.
+	Spec NamespaceTunnelQuotaSpec `json:"spec,omitempty"`
+	// Status stores reservations maintained by the operator.
+	Status NamespaceTunnelQuotaStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
+// NamespaceTunnelQuotaList contains NamespaceTunnelQuota resources.
 type NamespaceTunnelQuotaList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []NamespaceTunnelQuota `json:"items"`
+	// Items is the list of namespace tunnel quotas.
+	Items []NamespaceTunnelQuota `json:"items"`
 }
 
 // init registers the namespace quota API types with the scheme builder.
