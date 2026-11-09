@@ -21,9 +21,6 @@ spec:
     - name: Limit
       type: integer
       jsonPath: .spec.limit
-    - name: Reserved
-      type: integer
-      jsonPath: .status.reservations
     schema:
       openAPIV3Schema:
         type: object
