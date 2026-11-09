@@ -139,7 +139,7 @@ cleanup succeeds. A failed cleanup therefore retains both the finalizer and
 the quota slot for a later retry.
 
 The operator's RBAC grants it read access to quota specs and write access only
-to quota status. Restrict creation and updates of `NamespaceTunnelQuota`
+to quota status. Restrict creation, updates, and deletion of `NamespaceTunnelQuota`
 objects to trusted namespace administrators: changing `spec.limit` is an
 administrative capacity decision. The namespaced installation grants these
 permissions only inside each configured managed namespace.
