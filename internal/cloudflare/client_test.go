@@ -161,8 +161,8 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			wantMatch:     true,
 		},
 		{
-			name:     "duplicate normalized emails are treated as sets",
-			policies: `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}},{"email":{"email":" DEV@example.com "}}],"exclude":[],"require":[]}]`,
+			name:          "duplicate normalized emails are treated as sets",
+			policies:      `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}},{"email":{"email":" DEV@example.com "}}],"exclude":[],"require":[]}]`,
 			allowedEmails: []string{"dev@example.com", " DEV@example.com "},
 			wantMatch:     true,
 		},
