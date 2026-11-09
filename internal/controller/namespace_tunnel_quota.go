@@ -37,9 +37,12 @@ func (r *AgentEdgeTunnelReconciler) ensureQuotaReservation(ctx context.Context, 
 		// merely-Pending objects that have not been admitted.
 		var tunnels agentopsv1alpha1.AgentEdgeTunnelList
 		if err := reader.List(ctx, &tunnels, client.InNamespace(t.Namespace)); err != nil { return err }
+		liveUIDs := make(map[string]struct{}, len(tunnels.Items))
+		for i := range tunnels.Items { liveUIDs[string(tunnels.Items[i].UID)] = struct{}{} }
 		reservations := make(map[string]agentopsv1alpha1.TunnelReservation, len(quota.Status.Reservations)+len(tunnels.Items)+1)
 		for _, item := range quota.Status.Reservations {
-			if item.UID != "" { reservations[item.UID] = item }
+			if item.UID == "" { continue }
+			if _, live := liveUIDs[item.UID]; live { reservations[item.UID] = item }
 		}
 		for i := range tunnels.Items {
 			item := &tunnels.Items[i]
