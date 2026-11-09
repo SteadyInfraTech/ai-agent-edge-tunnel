@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -53,8 +54,17 @@ func (r *AgentEdgeTunnelReconciler) ensureQuotaReservation(ctx context.Context, 
 			return fmt.Errorf("namespace tunnel quota exhausted: %d of %d reservations are in use", len(reservations), quota.Spec.Limit)
 		}
 		reservations[uid] = agentopsv1alpha1.TunnelReservation{Name:t.Name, UID:uid}
-		next := make([]agentopsv1alpha1.TunnelReservation, 0, len(reservations))
-		for _, reservation := range reservations { next = append(next, reservation) }
+		uids := make([]string, 0, len(reservations))
+		for uid := range reservations { uids = append(uids, uid) }
+		sort.Strings(uids)
+		next := make([]agentopsv1alpha1.TunnelReservation, 0, len(uids))
+		unchanged := len(quota.Status.Reservations) == len(uids)
+		for _, uid := range uids {
+			reservation := reservations[uid]
+			next = append(next, reservation)
+			if unchanged && !containsReservation(quota.Status.Reservations, uid) { unchanged = false }
+		}
+		if unchanged { return nil }
 		quota.Status.Reservations = next
 		return r.Status().Update(ctx, &quota)
 	})
@@ -82,4 +92,9 @@ func (r *AgentEdgeTunnelReconciler) releaseQuotaReservation(ctx context.Context,
 		quota.Status.Reservations = next
 		return r.Status().Update(ctx, &quota)
 	})
+}
+
+func containsReservation(reservations []agentopsv1alpha1.TunnelReservation, uid string) bool {
+	for _, reservation := range reservations { if reservation.UID == uid { return true } }
+	return false
 }
