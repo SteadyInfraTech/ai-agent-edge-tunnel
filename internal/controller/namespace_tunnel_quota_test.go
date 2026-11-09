@@ -37,6 +37,35 @@ func TestNamespaceQuotaRejectsAdmissionBeforeCloudflareCreate(t *testing.T) {
 	require.Zero(t, h.cf.CreateAccessCalls)
 }
 
+// countingQuotaReader records namespace List calls while delegating reads to the wrapped reader.
+type countingQuotaReader struct {
+	client.Reader
+	listCalls int
+}
+
+func (r *countingQuotaReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	r.listCalls++
+	return r.Reader.List(ctx, list, opts...)
+}
+
+// TestNamespaceQuotaExistingReservationSkipsNamespaceList verifies an existing UID reservation avoids rebuilding the baseline.
+func TestNamespaceQuotaExistingReservationSkipsNamespaceList(t *testing.T) {
+	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+		Status: agentopsv1alpha1.NamespaceTunnelQuotaStatus{
+			Reservations: []agentopsv1alpha1.TunnelReservation{{Name: "test-agent-tunnel", UID: "11111111-aaaa-bbbb-cccc-222222222222"}},
+		},
+	}
+	h := newHarness(t, nil, quota)
+	reader := &countingQuotaReader{Reader: h.k8s}
+	h.r.APIReader = reader
+
+	tunnel := h.get()
+	require.NoError(t, h.r.ensureQuotaReservation(context.Background(), &tunnel, false))
+	require.Zero(t, reader.listCalls, "an existing reservation must return before listing namespace tunnels")
+}
+
 // TestNamespaceQuotaAdmissionIsIdempotentAndReleased verifies retries reuse reservations and cleanup frees capacity.
 func TestNamespaceQuotaAdmissionIsIdempotentAndReleased(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{

@@ -58,6 +58,13 @@ func (r *AgentEdgeTunnelReconciler) ensureQuotaReservation(ctx context.Context, 
 			}
 			return err
 		}
+		uid := string(t.UID)
+		if uid == "" {
+			return fmt.Errorf("AgentEdgeTunnel %s/%s has no UID; refusing quota admission", t.Namespace, t.Name)
+		}
+		if containsReservation(quota.Status.Reservations, uid) {
+			return nil
+		}
 
 		// Rebuild the baseline from the API server on every CAS attempt. This
 		// accounts for tunnels that predate quota creation without counting
@@ -85,12 +92,7 @@ func (r *AgentEdgeTunnelReconciler) ensureQuotaReservation(ctx context.Context, 
 				reservations[string(item.UID)] = agentopsv1alpha1.TunnelReservation{Name: item.Name, UID: string(item.UID)}
 			}
 		}
-		uid := string(t.UID)
-		if uid == "" {
-			return fmt.Errorf("AgentEdgeTunnel %s/%s has no UID; refusing quota admission", t.Namespace, t.Name)
-		}
-		_, alreadyReserved := reservations[uid]
-		if !alreadyReserved && !existing && int32(len(reservations)) >= quota.Spec.Limit {
+		if !existing && int32(len(reservations)) >= quota.Spec.Limit {
 			return fmt.Errorf("%w: %d of %d reservations are in use", errQuotaExhausted, len(reservations), quota.Spec.Limit)
 		}
 		reservations[uid] = agentopsv1alpha1.TunnelReservation{Name: t.Name, UID: uid}
