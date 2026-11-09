@@ -139,9 +139,6 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Keep the policy check for objects without recorded tunnel IDs, before
 	// provisioning can create any Cloudflare resources.
 	if err := r.validateOperatorPolicy(&tunnel); err != nil {
-		if tunnel.Status.TunnelID != "" {
-			return ctrl.Result{}, r.terminate(ctx, &tunnel, "operator security policy changed; resources removed: "+err.Error())
-		}
 		tunnel.Status.Phase = agentopsv1alpha1.PhaseFailed
 		tunnel.Status.Message = err.Error()
 		return ctrl.Result{}, r.Status().Update(ctx, &tunnel)
