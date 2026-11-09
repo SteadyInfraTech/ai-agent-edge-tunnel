@@ -546,7 +546,8 @@ func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1al
 		return nil
 	}
 	if err := r.deleteConnector(ctx, t); err != nil {
-		// Without this the tunnel cannot be deleted; the other two still can.
+		// Without this the tunnel cannot be deleted. DNS can still be removed,
+		// but the Access application is retained while the tunnel remains.
 		connectorErr := fmt.Errorf("removing connector: %w", err)
 		return errors.Join(connectorErr, r.cleanupCloudflare(ctx, t, false))
 	}
