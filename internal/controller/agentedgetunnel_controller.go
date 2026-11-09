@@ -56,7 +56,7 @@ const (
 type AgentEdgeTunnelReconciler struct {
 	client.Client
 	// APIReader bypasses the cache for quota reservation compare-and-swap retries.
-	APIReader client.Reader
+	APIReader        client.Reader
 	Scheme           *runtime.Scheme
 	CloudflareClient cf.TunnelService
 	// AccountID is the Cloudflare account used for Access applications.
