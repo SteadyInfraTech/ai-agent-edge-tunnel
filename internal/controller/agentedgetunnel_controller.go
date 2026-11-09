@@ -955,5 +955,19 @@ func (r *AgentEdgeTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentopsv1alpha1.AgentEdgeTunnel{}).
 		Owns(&appsv1.Deployment{}).
+		Watches(&agentopsv1alpha1.NamespaceTunnelQuota{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []reconcile.Request {
+				var tunnels agentopsv1alpha1.AgentEdgeTunnelList
+				if err := r.List(ctx, &tunnels, client.InNamespace(obj.GetNamespace())); err != nil {
+					log.FromContext(ctx).Error(err, "Unable to enqueue tunnels after namespace quota change", "namespace", obj.GetNamespace())
+					return nil
+				}
+				requests := make([]reconcile.Request, 0, len(tunnels.Items))
+				for i := range tunnels.Items {
+					requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&tunnels.Items[i])})
+				}
+				return requests
+			},
+		)).
 		Complete(r)
 }
