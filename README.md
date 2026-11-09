@@ -159,7 +159,9 @@ kubectl -n edge-tunnel-system create secret generic edge-tunnel-cloudflare \
   --from-literal=account-id=... --from-literal=api-token=...
 kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
   --from-literal=EDGE_BASE_DOMAIN=agents.example.com \
-  --from-literal=CONNECTOR_IMAGE=<pinned cloudflared image>
+  --from-literal=CLOUDFLARE_ZONE_ID=<zone-id> \
+  --from-literal=CONNECTOR_IMAGE=<pinned cloudflared image> \
+  --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public
 make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
 make deploy IMG=<your-registry>/ai-agent-edge-tunnel:<tag>        # needs the kustomize CLI
 kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml
