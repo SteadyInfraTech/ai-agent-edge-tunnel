@@ -130,7 +130,9 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Account for already-provisioned tunnels before enforcing a newly-created
 	// namespace quota. Existing tunnels are grandfathered if the limit is lower.
 	if tunnel.Status.TunnelID != "" {
-		if err := r.ensureQuotaReservation(ctx, &tunnel, true); err != nil { return ctrl.Result{}, err }
+		if err := r.ensureQuotaReservation(ctx, &tunnel, true); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Existing Cloudflare resources must be checked against current operator
@@ -226,7 +228,9 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 	if err := r.cleanup(ctx, t); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleaning up Cloudflare resources: %w", err)
 	}
-	if err := r.releaseQuotaReservation(ctx, t); err != nil { return ctrl.Result{}, fmt.Errorf("releasing namespace quota reservation: %w", err) }
+	if err := r.releaseQuotaReservation(ctx, t); err != nil {
+		return ctrl.Result{}, fmt.Errorf("releasing namespace quota reservation: %w", err)
+	}
 	orig := t.DeepCopy()
 	controllerutil.RemoveFinalizer(t, FinalizerName)
 	return ctrl.Result{}, r.patchFinalizers(ctx, t, orig)
@@ -333,7 +337,9 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		return ctrl.Result{}, r.Status().Update(ctx, t)
 	}
 
-	if err := r.ensureQuotaReservation(ctx, t, t.Status.TunnelID != ""); err != nil { return ctrl.Result{}, err }
+	if err := r.ensureQuotaReservation(ctx, t, t.Status.TunnelID != ""); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if t.Status.TunnelID == "" {
 		// A Secret we cannot use would fail every attempt after the tunnel was
