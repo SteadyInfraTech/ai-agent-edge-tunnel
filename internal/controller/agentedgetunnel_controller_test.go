@@ -1026,3 +1026,17 @@ func TestRevokingPublicNamespaceCleansUpExistingTunnel(t *testing.T) {
 	assert.Empty(t, h.cf.DNSRecords)
 	assert.Empty(t, h.cf.AccessApps)
 }
+
+// TestPublicNamespaceAllowlistUsesExactNames prevents prefix or suffix
+// matches from granting unauthenticated access to an unintended namespace.
+func TestPublicNamespaceAllowlistUsesExactNames(t *testing.T) {
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
+		cr.Namespace = "agent-public-extra"
+		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
+	})
+	h.r.PublicNamespaces = map[string]struct{}{"agent-public": {}}
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+	assert.Zero(t, h.cf.CreateTunnelCalls)
+}
