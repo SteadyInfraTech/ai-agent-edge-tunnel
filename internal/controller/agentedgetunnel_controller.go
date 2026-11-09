@@ -20,7 +20,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
 	cf "github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
@@ -307,7 +309,9 @@ func (r *AgentEdgeTunnelReconciler) terminate(ctx context.Context, t *agentopsv1
 	if err := r.cleanup(ctx, t); err != nil {
 		return fmt.Errorf("cleaning up: %w", err)
 	}
-	if err := r.releaseQuotaReservation(ctx, t); err != nil { return fmt.Errorf("releasing namespace quota reservation: %w", err) }
+	if err := r.releaseQuotaReservation(ctx, t); err != nil {
+		return fmt.Errorf("releasing namespace quota reservation: %w", err)
+	}
 	t.Status.Phase = agentopsv1alpha1.PhaseTerminated
 	t.Status.Message = message
 	t.Status.TunnelID = ""
