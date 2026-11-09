@@ -91,8 +91,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
       - name: Run Live Cloudflare API Test
-        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
         run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
 
   kind-live-e2e:
