@@ -708,17 +708,21 @@ func orphanTunnel(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel)) 
 	return h
 }
 
-// TestOrphanTunnelWithoutAServiceIsAdopted checks that a tunnel with no connector needs no Secret to be reused.
-func TestOrphanTunnelWithoutAServiceIsAdopted(t *testing.T) {
+// TestOrphanTunnelWithoutAServiceRequiresOwnershipEvidence checks that a
+// same-name tunnel cannot be adopted without independent ownership evidence.
+func TestOrphanTunnelWithoutAServiceRequiresOwnershipEvidence(t *testing.T) {
 	h := orphanTunnel(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.Service = nil })
 	_, err := h.reconcile()
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership cannot be established")
 	assert.Equal(t, 1, h.cf.CreateTunnelCalls)
-	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Len(t, h.cf.Tunnels, 1, "the candidate must remain untouched")
+	assert.Empty(t, h.get().Status.TunnelID)
 }
 
-// TestOrphanTunnelWithoutItsSecretIsReplaced checks that a tunnel whose secret is lost is deleted and replaced.
-func TestOrphanTunnelWithoutItsSecretIsReplaced(t *testing.T) {
+// TestOrphanTunnelWithoutItsSecretIsLeftUntouched checks that a missing
+// connector Secret is not treated as proof that a same-name tunnel is ours.
+func TestOrphanTunnelWithoutItsSecretIsLeftUntouched(t *testing.T) {
 	h := orphanTunnel(t, nil)
 	var oldID string
 	for id := range h.cf.Tunnels {
@@ -729,16 +733,16 @@ func TestOrphanTunnelWithoutItsSecretIsReplaced(t *testing.T) {
 	require.NoError(t, h.k8s.Delete(context.Background(), sec))
 
 	_, err = h.reconcile()
-	require.NoError(t, err)
-	assert.NotContains(t, h.cf.Tunnels, oldID, "the unusable tunnel must be deleted")
-	assert.Equal(t, 2, h.cf.CreateTunnelCalls)
-	require.Len(t, h.cf.Tunnels, 1)
-	assert.Contains(t, h.cf.Tunnels, h.get().Status.TunnelID)
-	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership cannot be established")
+	assert.Contains(t, h.cf.Tunnels, oldID, "the candidate must not be deleted")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "do not create a duplicate while ownership is ambiguous")
+	assert.Empty(t, h.get().Status.TunnelID)
 }
 
-// TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsReplaced checks that credentials for a different tunnel are not trusted.
-func TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsReplaced(t *testing.T) {
+// TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsLeftUntouched checks that
+// mismatched credentials do not authorize deletion of the candidate tunnel.
+func TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsLeftUntouched(t *testing.T) {
 	h := orphanTunnel(t, nil)
 	var oldID string
 	for id := range h.cf.Tunnels {
@@ -750,10 +754,11 @@ func TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsReplaced(t *testing.T) {
 	require.NoError(t, h.k8s.Update(context.Background(), sec))
 
 	_, err = h.reconcile()
-	require.NoError(t, err)
-	assert.NotContains(t, h.cf.Tunnels, oldID)
-	assert.Equal(t, 2, h.cf.CreateTunnelCalls)
-	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership cannot be established")
+	assert.Contains(t, h.cf.Tunnels, oldID)
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls)
+	assert.Empty(t, h.get().Status.TunnelID)
 }
 
 // TestTunnelNamedForAnotherObjectIsNeverTouched checks that only the tunnel named for this object's UID is recovered.
@@ -786,29 +791,32 @@ func seedAccessApp(h *harness, id string, emails []string) {
 	}), Domain: testHostname, Emails: emails}
 }
 
-// TestOrphanAccessAppWithAPolicyIsAdopted checks that a complete application from an earlier attempt is reused.
-func TestOrphanAccessAppWithAPolicyIsAdopted(t *testing.T) {
+// TestOrphanAccessAppIsLeftUntouchedWithoutOwnershipProof checks that a
+// name/domain match and a matching allow policy do not prove application ownership.
+func TestOrphanAccessAppIsLeftUntouchedWithoutOwnershipProof(t *testing.T) {
 	h := newHarness(t, nil)
 	seedAccessApp(h, "orphan-app", []string{"dev@example.com"})
 
 	_, err := h.reconcile()
-	require.NoError(t, err)
-	assert.Zero(t, h.cf.CreateAccessCalls, "a second application must not be created")
-	assert.Equal(t, "orphan-app", h.get().Status.AccessAppID)
-	assert.Len(t, h.cf.AccessApps, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership and policy identity cannot be established")
+	assert.Zero(t, h.cf.CreateAccessCalls)
+	assert.Contains(t, h.cf.AccessApps, "orphan-app", "the candidate must remain untouched")
+	assert.Empty(t, h.get().Status.AccessAppID)
 }
 
-// TestOrphanAccessAppWithoutAPolicyIsReplaced checks that an application with no policy is deleted and recreated.
-func TestOrphanAccessAppWithoutAPolicyIsReplaced(t *testing.T) {
+// TestOrphanAccessAppWithoutPolicyIsLeftUntouched checks that even an
+// incomplete same-name application is not deleted without ownership proof.
+func TestOrphanAccessAppWithoutPolicyIsLeftUntouched(t *testing.T) {
 	h := newHarness(t, nil)
 	seedAccessApp(h, "incomplete-app", nil)
 
 	_, err := h.reconcile()
-	require.NoError(t, err)
-	assert.NotContains(t, h.cf.AccessApps, "incomplete-app")
-	assert.Equal(t, 1, h.cf.CreateAccessCalls)
-	require.Len(t, h.cf.AccessApps, 1)
-	assert.Contains(t, h.cf.AccessApps, h.get().Status.AccessAppID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership and policy identity cannot be established")
+	assert.Contains(t, h.cf.AccessApps, "incomplete-app")
+	assert.Zero(t, h.cf.CreateAccessCalls)
+	assert.Empty(t, h.get().Status.AccessAppID)
 }
 
 // TestAccessAppOfAnotherNameIsNeverTouched checks that an application not named for this object is left alone.
