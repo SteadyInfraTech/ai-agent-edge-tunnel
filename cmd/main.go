@@ -34,8 +34,8 @@ func init() {
 	utilruntime.Must(agentopsv1alpha1.AddToScheme(scheme))
 }
 
-// namespaceConfig turns a comma-separated list into the cache's namespace
-// restriction. An empty list returns nil, which means every namespace.
+// namespaceSet parses a comma-separated namespace allowlist. An empty list
+// returns an empty set, which denies public tunnels everywhere.
 func namespaceSet(list string) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, ns := range strings.Split(list, ",") {
@@ -104,10 +104,6 @@ func main() {
 		cfClient = fake.New()
 		accountID = "fake-account"
 		zoneID = "fake-zone"
-		if zoneID == "" {
-			setupLog.Error(errors.New("missing Cloudflare zone"), "CLOUDFLARE_ZONE_ID is required to pin the operator to one Cloudflare zone")
-			os.Exit(1)
-		}
 		if baseDomain == "" {
 			baseDomain = "agents.example.invalid"
 		}
@@ -121,6 +117,10 @@ func main() {
 		if accountID == "" || apiToken == "" {
 			setupLog.Error(errors.New("missing credentials"),
 				"CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required (use --dry-run for local development)")
+			os.Exit(1)
+		}
+		if zoneID == "" {
+			setupLog.Error(errors.New("missing Cloudflare zone"), "CLOUDFLARE_ZONE_ID is required to pin the operator to one Cloudflare zone")
 			os.Exit(1)
 		}
 		if baseDomain == "" {
