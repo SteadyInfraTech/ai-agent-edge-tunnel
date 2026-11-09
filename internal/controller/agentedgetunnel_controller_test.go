@@ -1046,9 +1046,21 @@ func TestPublicNamespaceAllowlistUsesExactNames(t *testing.T) {
 func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
 	cases := map[string]func(*harness){
 		"application deleted": func(h *harness) { delete(h.cf.AccessApps, h.get().Status.AccessAppID) },
-		"allow policy removed": func(h *harness) { app := h.cf.AccessApps[h.get().Status.AccessAppID]; app.Emails = nil; h.cf.AccessApps[h.get().Status.AccessAppID] = app },
-		"allowlist broadened": func(h *harness) { app := h.cf.AccessApps[h.get().Status.AccessAppID]; app.Emails = append(app.Emails, "attacker@example.com"); h.cf.AccessApps[h.get().Status.AccessAppID] = app },
-		"allowed identity changed": func(h *harness) { app := h.cf.AccessApps[h.get().Status.AccessAppID]; app.Emails = []string{"other@example.com"}; h.cf.AccessApps[h.get().Status.AccessAppID] = app },
+		"allow policy removed": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.Emails = nil
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
+		"allowlist broadened": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.Emails = append(app.Emails, "attacker@example.com")
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
+		"allowed identity changed": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.Emails = []string{"other@example.com"}
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
