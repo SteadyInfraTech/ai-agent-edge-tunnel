@@ -35,6 +35,7 @@ jobs:
           files="$(gofmt -l $(git ls-files '*.go' | grep -v zz_generated))"
           if [ -n "$files" ]; then
             echo "$files"
+            gofmt -d $files
             exit 1
           fi
 
