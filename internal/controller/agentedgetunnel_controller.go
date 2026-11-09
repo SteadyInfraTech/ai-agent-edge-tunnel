@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -55,6 +56,10 @@ const (
 // AgentEdgeTunnelReconciler reconciles an AgentEdgeTunnel object
 type AgentEdgeTunnelReconciler struct {
 	client.Client
+	// quotaLocks serialize namespace admissions within this process. API-server
+	// resourceVersion conflicts remain the cross-replica compare-and-swap.
+	quotaLocksMu sync.Mutex
+	quotaLocks   map[string]*sync.Mutex
 	// APIReader bypasses the cache for quota reservation compare-and-swap retries.
 	APIReader        client.Reader
 	Scheme           *runtime.Scheme
