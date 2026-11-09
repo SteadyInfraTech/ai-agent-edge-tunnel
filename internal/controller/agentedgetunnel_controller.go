@@ -117,7 +117,9 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Terminated is final. Without this guard the provisioning path below would
 	// create a brand-new tunnel for an object whose TTL already expired.
 	if tunnel.Status.Phase == agentopsv1alpha1.PhaseTerminated {
-		return ctrl.Result{}, nil
+		// A previous cleanup may have succeeded while releasing its quota
+		// reservation failed. Retry the release even though termination is final.
+		return ctrl.Result{}, r.releaseQuotaReservation(ctx, &tunnel)
 	}
 
 	// The finalizer must exist before any Cloudflare resource is created, or a
@@ -230,6 +232,15 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 	if err := r.cleanup(ctx, t); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleaning up Cloudflare resources: %w", err)
 	}
+	// Clear the recorded IDs before releasing the reservation. Otherwise a
+	// concurrent admission scan could see the still-present deleting object
+	// and re-add its reservation after cleanup has already completed.
+	t.Status.TunnelID = ""
+	t.Status.AccessAppID = ""
+	t.Status.ConnectorReady = false
+	if err := r.Status().Update(ctx, t); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.releaseQuotaReservation(ctx, t); err != nil {
 		return ctrl.Result{}, fmt.Errorf("releasing namespace quota reservation: %w", err)
 	}
@@ -309,15 +320,18 @@ func (r *AgentEdgeTunnelReconciler) terminate(ctx context.Context, t *agentopsv1
 	if err := r.cleanup(ctx, t); err != nil {
 		return fmt.Errorf("cleaning up: %w", err)
 	}
-	if err := r.releaseQuotaReservation(ctx, t); err != nil {
-		return fmt.Errorf("releasing namespace quota reservation: %w", err)
-	}
 	t.Status.Phase = agentopsv1alpha1.PhaseTerminated
 	t.Status.Message = message
 	t.Status.TunnelID = ""
 	t.Status.AccessAppID = ""
 	t.Status.ConnectorReady = false
-	return r.Status().Update(ctx, t)
+	if err := r.Status().Update(ctx, t); err != nil {
+		return err
+	}
+	if err := r.releaseQuotaReservation(ctx, t); err != nil {
+		return fmt.Errorf("releasing namespace quota reservation: %w", err)
+	}
+	return nil
 }
 
 // provision drives Pending/Failed objects to Active. Every step is safe to
