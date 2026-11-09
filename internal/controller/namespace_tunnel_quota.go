@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -11,6 +12,23 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// lockQuotaNamespace serializes quota mutations in this process. The API-server
+// resourceVersion check in Status().Update is still required for other replicas.
+func (r *AgentEdgeTunnelReconciler) lockQuotaNamespace(namespace string) func() {
+	r.quotaLocksMu.Lock()
+	if r.quotaLocks == nil {
+		r.quotaLocks = make(map[string]*sync.Mutex)
+	}
+	lock := r.quotaLocks[namespace]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		r.quotaLocks[namespace] = lock
+	}
+	r.quotaLocksMu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
 
 // quotaReader deliberately bypasses the manager cache for reservation CAS
 // retries. A stale cached resourceVersion cannot safely arbitrate admission.
@@ -25,6 +43,8 @@ func (r *AgentEdgeTunnelReconciler) quotaReader() client.Reader {
 // provisioned tunnels are grandfathered when a quota is first introduced;
 // new provisioning attempts must fit under the configured limit.
 func (r *AgentEdgeTunnelReconciler) ensureQuotaReservation(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, existing bool) error {
+	unlock := r.lockQuotaNamespace(t.Namespace)
+	defer unlock()
 	reader := r.quotaReader()
 	key := types.NamespacedName{Namespace: t.Namespace, Name: "default"}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -96,6 +116,8 @@ func (r *AgentEdgeTunnelReconciler) ensureQuotaReservation(ctx context.Context, 
 // releaseQuotaReservation is called only after external resources have been
 // removed. Failure keeps the AgentEdgeTunnel finalizer/phase retryable.
 func (r *AgentEdgeTunnelReconciler) releaseQuotaReservation(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	unlock := r.lockQuotaNamespace(t.Namespace)
+	defer unlock()
 	reader := r.quotaReader()
 	key := types.NamespacedName{Namespace: t.Namespace, Name: "default"}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
