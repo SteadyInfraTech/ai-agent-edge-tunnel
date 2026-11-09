@@ -66,7 +66,6 @@ func (c *Client) CreateTunnel(_ context.Context, name string) (*cloudflare.Tunne
 		Name:      name,
 		Secret:    "fake-secret",
 		Hostname:  fmt.Sprintf("%s.cfargotunnel.com", id),
-		Token:     "fake-token",
 	}
 	c.Tunnels[id] = info
 	return info, nil
