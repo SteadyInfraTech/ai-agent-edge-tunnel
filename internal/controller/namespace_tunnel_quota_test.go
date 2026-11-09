@@ -23,7 +23,7 @@ func TestNamespaceQuotaAbsentMeansUnlimited(t *testing.T) {
 func TestNamespaceQuotaRejectsAdmissionBeforeCloudflareCreate(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-		Spec: agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 0},
+		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 0},
 	}
 	h := newHarness(t, nil, quota)
 	_, err := h.reconcile()
@@ -35,7 +35,7 @@ func TestNamespaceQuotaRejectsAdmissionBeforeCloudflareCreate(t *testing.T) {
 func TestNamespaceQuotaAdmissionIsIdempotentAndReleased(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-		Spec: agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
 	}
 	h := newHarness(t, nil, quota)
 	tunnel := h.get()
@@ -44,7 +44,7 @@ func TestNamespaceQuotaAdmissionIsIdempotentAndReleased(t *testing.T) {
 
 	second := &agentopsv1alpha1.AgentEdgeTunnel{
 		ObjectMeta: metav1.ObjectMeta{Name: "second", Namespace: "default", UID: types.UID("22222222-aaaa-bbbb-cccc-333333333333")},
-		Spec: tunnel.Spec,
+		Spec:       tunnel.Spec,
 	}
 	require.NoError(t, h.k8s.Create(context.Background(), second))
 	require.ErrorContains(t, h.r.ensureQuotaReservation(context.Background(), second, false), "quota exhausted")
@@ -53,7 +53,7 @@ func TestNamespaceQuotaAdmissionIsIdempotentAndReleased(t *testing.T) {
 	require.NoError(t, h.r.ensureQuotaReservation(context.Background(), second, false), "released slot should be reusable")
 
 	var stored agentopsv1alpha1.NamespaceTunnelQuota
-	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace:"default", Name:"default"}, &stored))
+	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &stored))
 	require.Len(t, stored.Status.Reservations, 1)
 	require.Equal(t, string(second.UID), stored.Status.Reservations[0].UID)
 }
@@ -61,7 +61,7 @@ func TestNamespaceQuotaAdmissionIsIdempotentAndReleased(t *testing.T) {
 func TestNamespaceQuotaGrandfathersExistingTunnelsWhenLimitDrops(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-		Spec: agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 0},
+		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 0},
 	}
 	h := newHarness(t, func(tunnel *agentopsv1alpha1.AgentEdgeTunnel) {
 		tunnel.Status.TunnelID = "already-created"
@@ -70,14 +70,14 @@ func TestNamespaceQuotaGrandfathersExistingTunnelsWhenLimitDrops(t *testing.T) {
 	tunnel := h.get()
 	require.NoError(t, h.r.ensureQuotaReservation(context.Background(), &tunnel, true), "existing tunnels are grandfathered")
 	require.ErrorContains(t, h.r.ensureQuotaReservation(context.Background(), &agentopsv1alpha1.AgentEdgeTunnel{
-		ObjectMeta: metav1.ObjectMeta{Name:"new", Namespace:"default", UID:types.UID("33333333-aaaa-bbbb-cccc-444444444444")},
+		ObjectMeta: metav1.ObjectMeta{Name: "new", Namespace: "default", UID: types.UID("33333333-aaaa-bbbb-cccc-444444444444")},
 	}, false), "quota exhausted")
 }
 
 func TestNamespaceQuotaReservationReleasedAfterTerminationCleanup(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-		Spec: agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
 	}
 	h := newHarness(t, nil, quota)
 	_, err := h.reconcile()
@@ -88,7 +88,7 @@ func TestNamespaceQuotaReservationReleasedAfterTerminationCleanup(t *testing.T) 
 	require.NoError(t, h.r.terminate(context.Background(), &tunnel, "test termination"))
 
 	var stored agentopsv1alpha1.NamespaceTunnelQuota
-	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace:"default", Name:"default"}, &stored))
+	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &stored))
 	require.Empty(t, stored.Status.Reservations)
 	require.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
 	require.Empty(t, h.cf.Tunnels)
