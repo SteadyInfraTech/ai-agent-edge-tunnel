@@ -351,7 +351,12 @@ func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID
 			return false, fmt.Errorf("encoding Access policy selector: %w", err)
 		}
 		var selector map[string]json.RawMessage
-		if err := json.Unmarshal(encoded, &selector); err != nil || len(selector) != 1 {
+		if err := json.Unmarshal(encoded, &selector); err != nil {
+			// Malformed selectors are policy drift, not transient API errors.
+			//nolint:nilerr // Deliberately fail closed on malformed policy selectors.
+			return false, nil
+		}
+		if len(selector) != 1 {
 			return false, nil
 		}
 		emailRaw, ok := selector["email"]
@@ -359,7 +364,12 @@ func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID
 			return false, nil
 		}
 		var emailSelector map[string]string
-		if err := json.Unmarshal(emailRaw, &emailSelector); err != nil || len(emailSelector) != 1 {
+		if err := json.Unmarshal(emailRaw, &emailSelector); err != nil {
+			// Malformed email selectors are policy drift, not transient API errors.
+			//nolint:nilerr // Deliberately fail closed on malformed policy selectors.
+			return false, nil
+		}
+		if len(emailSelector) != 1 {
 			return false, nil
 		}
 		email := strings.ToLower(strings.TrimSpace(emailSelector["email"]))
