@@ -76,8 +76,8 @@ unstructured, so this operator does not depend on agentops-operator and starts w
   object's namespace to appear in the operator's `EDGE_PUBLIC_NAMESPACES` allowlist; an empty allowlist
   denies public tunnels everywhere. Removing a namespace from the allowlist causes its existing public
   tunnels to be cleaned up and marked `Terminated`.
-- **One configured Cloudflare zone.** `CLOUDFLARE_ZONE_ID` is required at startup. The operator rejects
-  objects whose `spec.cloudflare.zoneID` differs, preventing tenants from selecting another zone through
+- **One configured Cloudflare zone.** `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_ZONE_NAME` are required at startup. The operator verifies
+  `EDGE_BASE_DOMAIN` is within the configured zone name and rejects objects whose `spec.cloudflare.zoneID` differs, preventing tenants from selecting another zone through
   their custom resource. Configure `EDGE_BASE_DOMAIN` to a domain served by that zone.
 - **Unimplemented protections are rejected, not ignored.** `security.webhookValidation` (edge HMAC checks) and
   `security.serviceTokens` are not implemented yet; setting them fails validation so nobody believes a
@@ -141,7 +141,7 @@ Early `v1alpha1`.
 | Flag / env | Purpose |
 |---|---|
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | Required. The operator exits at startup if either is missing. The token needs Tunnel, DNS and Access edit permissions. |
-| `CLOUDFLARE_ZONE_ID` | Required. Pins this operator instance to one Cloudflare zone; each object's `spec.cloudflare.zoneID` must match. |
+| `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_ZONE_NAME` | Required. Pins this operator instance to one Cloudflare zone; the base domain must be the zone apex or one of its subdomains, and each object's `spec.cloudflare.zoneID` must match. |
 | `EDGE_PUBLIC_NAMESPACES` | Optional comma-separated namespace allowlist for `security.allowPublic: true`. Empty or unset denies public tunnels in every namespace. |
 | `--base-domain` / `EDGE_BASE_DOMAIN` | Required. Hostnames are `<subdomain>.<base-domain>`. |
 | `--connector-image` / `CONNECTOR_IMAGE` | Required. The cloudflared image; pin a version or digest. |
