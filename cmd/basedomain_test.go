@@ -36,3 +36,29 @@ func TestValidateBaseDomain(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateBaseDomainInZone rejects hostnames outside the configured zone.
+func TestValidateBaseDomainInZone(t *testing.T) {
+	for name, tc := range map[string]struct {
+		base string
+		zone string
+		ok   bool
+	}{
+		"zone apex": {"example.com", "example.com", true},
+		"subdomain": {"agents.example.com", "example.com", true},
+		"nested subdomain": {"agents.dev.example.com", "example.com", true},
+		"sibling domain": {"example.net", "example.com", false},
+		"suffix spoof": {"notexample.com", "example.com", false},
+		"invalid zone": {"agents.example.com", "https://example.com", false},
+		"empty zone": {"agents.example.com", "", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := validateBaseDomainInZone(tc.base, tc.zone)
+			if tc.ok {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
+}
