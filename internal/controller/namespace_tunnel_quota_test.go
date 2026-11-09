@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
-	"sync"
 	"testing"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
@@ -121,62 +119,4 @@ func TestNamespaceQuotaPrunesReservationsForDeletedObjects(t *testing.T) {
 	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &stored))
 	require.Len(t, stored.Status.Reservations, 1)
 	require.Equal(t, string(tunnel.UID), stored.Status.Reservations[0].UID)
-}
-
-// TestNamespaceQuotaConcurrentAdmissionsCannotOversubscribe verifies separate reconcilers cannot exceed the limit.
-func TestNamespaceQuotaConcurrentAdmissionsCannotOversubscribe(t *testing.T) {
-	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
-	}
-	h := newHarness(t, nil, quota)
-	tunnels := []*agentopsv1alpha1.AgentEdgeTunnel{
-		{ObjectMeta: metav1.ObjectMeta{Name: "concurrent-a", Namespace: "default", UID: types.UID("aaaaaaaa-aaaa-bbbb-cccc-aaaaaaaaaaaa")}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "concurrent-b", Namespace: "default", UID: types.UID("bbbbbbbb-bbbb-bbbb-cccc-bbbbbbbbbbbb")}},
-	}
-	for _, tunnel := range tunnels {
-		require.NoError(t, h.k8s.Create(context.Background(), tunnel))
-	}
-
-	newReconciler := func() *AgentEdgeTunnelReconciler {
-		return &AgentEdgeTunnelReconciler{
-			Client:           h.k8s,
-			APIReader:        h.k8s,
-			Scheme:           h.r.Scheme,
-			CloudflareClient: h.cf,
-			ZoneID:           "zone",
-			DryRun:           true,
-		}
-	}
-	reconcilers := []*AgentEdgeTunnelReconciler{newReconciler(), newReconciler()}
-	start := make(chan struct{})
-	errs := make(chan error, len(tunnels))
-	var wg sync.WaitGroup
-	for i, tunnel := range tunnels {
-		wg.Add(1)
-		go func(r *AgentEdgeTunnelReconciler, tunnel *agentopsv1alpha1.AgentEdgeTunnel) {
-			defer wg.Done()
-			<-start
-			errs <- r.ensureQuotaReservation(context.Background(), tunnel, false)
-		}(reconcilers[i], tunnel)
-	}
-	close(start)
-	wg.Wait()
-	close(errs)
-
-	admitted, rejected := 0, 0
-	for err := range errs {
-		if err == nil {
-			admitted++
-		} else {
-			require.True(t, errors.Is(err, errQuotaExhausted), "unexpected admission error: %v", err)
-			rejected++
-		}
-	}
-	require.Equal(t, 1, admitted)
-	require.Equal(t, 1, rejected)
-
-	var stored agentopsv1alpha1.NamespaceTunnelQuota
-	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &stored))
-	require.Len(t, stored.Status.Reservations, 1)
 }

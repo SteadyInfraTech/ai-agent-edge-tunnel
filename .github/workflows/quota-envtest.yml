@@ -24,6 +24,9 @@ jobs:
       - name: Install Kubernetes envtest assets
         run: |
           go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.18
-          echo "KUBEBUILDER_ASSETS=$(setup-envtest use 1.30.x -p path)" >> "$GITHUB_ENV"
+          assets="$(setup-envtest use 1.30.0 -p path)"
+          test -x "$assets/kube-apiserver"
+          test -x "$assets/etcd"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
       - name: Run namespace quota envtest
         run: go test -race -count=1 ./internal/controller -run '^TestNamespaceQuotaEnvtest$'
