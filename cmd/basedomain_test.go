@@ -44,13 +44,13 @@ func TestValidateBaseDomainInZone(t *testing.T) {
 		zone string
 		ok   bool
 	}{
-		"zone apex": {"example.com", "example.com", true},
-		"subdomain": {"agents.example.com", "example.com", true},
+		"zone apex":        {"example.com", "example.com", true},
+		"subdomain":        {"agents.example.com", "example.com", true},
 		"nested subdomain": {"agents.dev.example.com", "example.com", true},
-		"sibling domain": {"example.net", "example.com", false},
-		"suffix spoof": {"notexample.com", "example.com", false},
-		"invalid zone": {"agents.example.com", "https://example.com", false},
-		"empty zone": {"agents.example.com", "", false},
+		"sibling domain":   {"example.net", "example.com", false},
+		"suffix spoof":     {"notexample.com", "example.com", false},
+		"invalid zone":     {"agents.example.com", "https://example.com", false},
+		"empty zone":       {"agents.example.com", "", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := validateBaseDomainInZone(tc.base, tc.zone)
