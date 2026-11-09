@@ -30,10 +30,13 @@ type Client struct {
 	DeleteTunnelErr error
 	DeleteDNSErr    error
 	DeleteAccessErr error
+	FindTunnelsErr  error
+	FindAccessErr   error
 }
 
 // AccessApp is a recorded Access application.
 type AccessApp struct {
+	Name   string
 	Domain string
 	Emails []string
 }
@@ -61,9 +64,8 @@ func (c *Client) CreateTunnel(_ context.Context, name string) (*cloudflare.Tunne
 		AccountID: "fake-account",
 		ID:        id,
 		Name:      name,
-		Secret:    "fake-secret",
+		Secret:    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 		Hostname:  fmt.Sprintf("%s.cfargotunnel.com", id),
-		Token:     "fake-token",
 	}
 	c.Tunnels[id] = info
 	return info, nil
@@ -87,7 +89,7 @@ func (c *Client) CreateDNSRecord(_ context.Context, _, hostname, tunnelID string
 
 // CreateAccessPolicy records the allowed emails for domain and returns the ID of
 // the new application. The ID starts with cloudflare.DryRunIDPrefix.
-func (c *Client) CreateAccessPolicy(_ context.Context, _, _, domain string, allowedEmails []string) (string, error) {
+func (c *Client) CreateAccessPolicy(_ context.Context, _, name, domain string, allowedEmails []string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.CreateAccessCalls++
@@ -95,7 +97,7 @@ func (c *Client) CreateAccessPolicy(_ context.Context, _, _, domain string, allo
 		return "", c.CreateAccessErr
 	}
 	id := fmt.Sprintf("%saccess-%d", cloudflare.DryRunIDPrefix, c.CreateAccessCalls)
-	c.AccessApps[id] = AccessApp{Domain: domain, Emails: allowedEmails}
+	c.AccessApps[id] = AccessApp{Name: name, Domain: domain, Emails: allowedEmails}
 	return id, nil
 }
 
@@ -134,4 +136,37 @@ func (c *Client) DeleteAccessApplication(_ context.Context, _, appID string) err
 	}
 	delete(c.AccessApps, appID)
 	return nil
+}
+
+// FindTunnels returns the recorded tunnels with exactly this name.
+func (c *Client) FindTunnels(_ context.Context, name string) ([]cloudflare.TunnelRef, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FindTunnelsErr != nil {
+		return nil, c.FindTunnelsErr
+	}
+	var out []cloudflare.TunnelRef
+	for id, t := range c.Tunnels {
+		if t.Name == name {
+			out = append(out, cloudflare.TunnelRef{ID: id, Name: t.Name})
+		}
+	}
+	return out, nil
+}
+
+// FindAccessApplications returns the recorded applications whose name and
+// domain match. An application with no emails has no allow policy.
+func (c *Client) FindAccessApplications(_ context.Context, _, name, domain string) ([]cloudflare.AccessAppRef, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FindAccessErr != nil {
+		return nil, c.FindAccessErr
+	}
+	var out []cloudflare.AccessAppRef
+	for id, a := range c.AccessApps {
+		if a.Name == name && a.Domain == domain {
+			out = append(out, cloudflare.AccessAppRef{ID: id, HasAllowPolicy: len(a.Emails) > 0})
+		}
+	}
+	return out, nil
 }

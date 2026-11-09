@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -302,34 +304,52 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		if err := r.checkConnectorSecretFree(ctx, t); err != nil {
 			return r.fail(ctx, t, err)
 		}
-		logger.Info("Creating Cloudflare tunnel", "name", t.Name)
-		info, err := r.CloudflareClient.CreateTunnel(ctx, tunnelName(t))
+		// A tunnel from an earlier attempt that stopped before its ID was
+		// recorded would otherwise be orphaned and then duplicated.
+		recovered, err := r.recoverTunnel(ctx, t)
 		if err != nil {
-			return r.fail(ctx, t, fmt.Errorf("creating tunnel: %w", err))
+			return r.fail(ctx, t, err)
 		}
-		hostname := r.hostname(t)
-		// Cloudflare returns the tunnel secret only once, so it is stored
-		// before anything else can fail.
-		if err := r.writeConnectorSecret(ctx, t, info, hostname); err != nil {
-			r.discardTunnel(ctx, info.ID)
-			return r.fail(ctx, t, fmt.Errorf("storing connector credentials: %w", err))
-		}
-		t.Status.TunnelID = info.ID
-		t.Status.Hostname = hostname
-		t.Status.Phase = agentopsv1alpha1.PhasePending
-		t.Status.Message = "tunnel created; configuring access and DNS"
-		if err := r.Status().Update(ctx, t); err != nil {
-			// An error does not prove the write was rejected: a timeout can
-			// still have stored the ID. Deleting the tunnel then would leave
-			// status pointing at a tunnel that no longer exists, and every
-			// retry would reuse that dead ID. A single re-read cannot settle
-			// it either, because the write may still commit afterwards. So
-			// the tunnel is kept. If the write really was lost, the leak is
-			// logged with the tunnel's ID and name, and the retry fails
-			// loudly if Cloudflare refuses the duplicate name, instead of
-			// silently running against a deleted tunnel.
-			logger.Error(err, "Status write failed after the tunnel was created; keeping the tunnel because the write may still commit. If it was lost, delete the tunnel by hand", "tunnelID", info.ID, "tunnelName", tunnelName(t))
-			return ctrl.Result{}, err
+		if recovered != nil {
+			t.Status.TunnelID = recovered.ID
+			t.Status.Hostname = r.hostname(t)
+			t.Status.Phase = agentopsv1alpha1.PhasePending
+			t.Status.Message = "recovered the tunnel from an earlier attempt; configuring access and DNS"
+			logger.Info("Adopted a tunnel from an earlier attempt", "tunnelID", recovered.ID, "tunnelName", recovered.Name)
+			if err := r.Status().Update(ctx, t); err != nil {
+				// Nothing was created, so a lost write only repeats this lookup.
+				return ctrl.Result{}, err
+			}
+		} else {
+			logger.Info("Creating Cloudflare tunnel", "name", t.Name)
+			info, err := r.CloudflareClient.CreateTunnel(ctx, tunnelName(t))
+			if err != nil {
+				return r.fail(ctx, t, fmt.Errorf("creating tunnel: %w", err))
+			}
+			hostname := r.hostname(t)
+			// Cloudflare returns the tunnel secret only once, so it is stored
+			// before anything else can fail.
+			if err := r.writeConnectorSecret(ctx, t, info, hostname); err != nil {
+				r.discardTunnel(ctx, info.ID)
+				return r.fail(ctx, t, fmt.Errorf("storing connector credentials: %w", err))
+			}
+			t.Status.TunnelID = info.ID
+			t.Status.Hostname = hostname
+			t.Status.Phase = agentopsv1alpha1.PhasePending
+			t.Status.Message = "tunnel created; configuring access and DNS"
+			if err := r.Status().Update(ctx, t); err != nil {
+				// An error does not prove the write was rejected: a timeout can
+				// still have stored the ID. Deleting the tunnel then would leave
+				// status pointing at a tunnel that no longer exists, and every
+				// retry would reuse that dead ID. A single re-read cannot settle
+				// it either, because the write may still commit afterwards. So
+				// the tunnel is kept. If the write really was lost, the leak is
+				// logged with the tunnel's ID and name, and the retry fails
+				// loudly if Cloudflare refuses the duplicate name, instead of
+				// silently running against a deleted tunnel.
+				logger.Error(err, "Status write failed after the tunnel was created; keeping the tunnel because the write may still commit. If it was lost, delete the tunnel by hand", "tunnelID", info.ID, "tunnelName", tunnelName(t))
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -392,6 +412,81 @@ func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context
 	return nil
 }
 
+// namesAreOwned reports whether t has enough UID data to construct its
+// deterministic Cloudflare resource name. The truncated UID suffix is only a
+// lookup filter, not proof of ownership; recoverTunnel and recoverAccessApp
+// must still require independent evidence before adopting or deleting matches.
+func namesAreOwned(t *agentopsv1alpha1.AgentEdgeTunnel) bool {
+	return len(t.UID) >= 8
+}
+
+// recoverTunnel looks for a tunnel that an earlier attempt created for t but
+// never recorded in status. A matching name is not proof of ownership. Recovery
+// is allowed only when the connector Secret is controlled by t and contains
+// credentials naming the candidate tunnel. If that evidence is absent or
+// mismatched, recovery stops and requires operator resolution; it never deletes
+// a same-name tunnel based on a failed ownership check.
+func (r *AgentEdgeTunnelReconciler) recoverTunnel(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (*cf.TunnelRef, error) {
+	if !namesAreOwned(t) {
+		return nil, nil
+	}
+	found, err := r.CloudflareClient.FindTunnels(ctx, tunnelName(t))
+	if err != nil {
+		return nil, fmt.Errorf("looking for a tunnel from an earlier attempt: %w", err)
+	}
+	if len(found) == 0 {
+		return nil, nil
+	}
+	if len(found) > 1 {
+		return nil, fmt.Errorf("found %d Cloudflare tunnels named %q; ownership is ambiguous and requires operator resolution", len(found), tunnelName(t))
+	}
+	ref := found[0]
+	ok, err := r.credentialsMatch(ctx, t, ref.ID)
+	if err != nil {
+		return nil, fmt.Errorf("verifying ownership of Cloudflare tunnel %s: %w", ref.ID, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("cloudflare tunnel %q (%s) matches this AgentEdgeTunnel's name, but ownership cannot be established; leave it untouched and resolve it manually", ref.Name, ref.ID)
+	}
+	return &ref, nil
+}
+
+// credentialsMatch reports whether the connector Secret controlled by t contains
+// credentials for tunnelID. Without a connector Secret there is no independent
+// ownership evidence, so recovery must not adopt or delete a same-name tunnel.
+func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, tunnelID string) (bool, error) {
+	if !hasConnector(t) {
+		return false, nil
+	}
+	var s corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &s); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !metav1.IsControlledBy(&s, t) {
+		return false, nil
+	}
+	var creds struct {
+		AccountTag   string
+		TunnelSecret string
+		TunnelID     string
+	}
+	if err := json.Unmarshal(s.Data[credentialsKey], &creds); err != nil {
+		// Malformed credentials provide no ownership evidence; this is not a reconcile error.
+		//nolint:nilerr // Deliberately treat malformed credentials as an ownership mismatch.
+		return false, nil
+	}
+	secret, err := base64.StdEncoding.DecodeString(creds.TunnelSecret)
+	if err != nil || len(secret) != 32 {
+		// Invalid tunnel secrets are absent ownership evidence, not a reconcile error.
+		//nolint:nilerr // Deliberately treat invalid secrets as an ownership mismatch.
+		return false, nil
+	}
+	return creds.AccountTag == r.AccountID && creds.TunnelID == tunnelID, nil
+}
+
 // discardTunnel removes a tunnel whose ID could not be recorded.
 func (r *AgentEdgeTunnelReconciler) discardTunnel(ctx context.Context, tunnelID string) {
 	if err := r.CloudflareClient.DeleteTunnel(ctx, tunnelID); err != nil {
@@ -406,9 +501,15 @@ func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentop
 	if len(emails) == 0 || t.Status.AccessAppID != "" {
 		return nil
 	}
-	appID, err := r.CloudflareClient.CreateAccessPolicy(ctx, r.AccountID, tunnelName(t), t.Status.Hostname, emails)
+	appID, err := r.recoverAccessApp(ctx, t)
 	if err != nil {
-		return fmt.Errorf("creating Access policy: %w", err)
+		return err
+	}
+	if appID == "" {
+		appID, err = r.CloudflareClient.CreateAccessPolicy(ctx, r.AccountID, tunnelName(t), t.Status.Hostname, emails)
+		if err != nil {
+			return fmt.Errorf("creating Access policy: %w", err)
+		}
 	}
 	t.Status.AccessAppID = appID
 	if err := r.Status().Update(ctx, t); err != nil {
@@ -422,31 +523,74 @@ func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentop
 	return nil
 }
 
-// cleanup removes everything the tunnel created, in an order that lets each
-// step succeed: the connector goes first (Cloudflare will not delete a tunnel
-// that still has live connections), then DNS and Access, then the tunnel. The
-// tunnel is last so a retry still has its ID. Every step is idempotent.
+// recoverAccessApp looks for an Access application that an earlier attempt
+// may have created for t but never recorded. Cloudflare's application lookup
+// exposes name and domain, not an owner identity; neither is sufficient proof
+// that this object created the application. Therefore every match is left
+// untouched and recovery stops for operator resolution. This deliberately
+// avoids adopting a pre-existing application or deleting an active one.
+func (r *AgentEdgeTunnelReconciler) recoverAccessApp(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (string, error) {
+	if !namesAreOwned(t) {
+		return "", nil
+	}
+	found, err := r.CloudflareClient.FindAccessApplications(ctx, r.AccountID, tunnelName(t), t.Status.Hostname)
+	if err != nil {
+		return "", fmt.Errorf("looking for an Access application from an earlier attempt: %w", err)
+	}
+	if len(found) > 0 {
+		ids := make([]string, 0, len(found))
+		for _, app := range found {
+			ids = append(ids, app.ID)
+		}
+		return "", fmt.Errorf("found matching Cloudflare Access application(s) %s for %q, but ownership and policy identity cannot be established; leave them untouched and resolve them manually", strings.Join(ids, ", "), t.Status.Hostname)
+	}
+	return "", nil
+}
+
+// cleanup removes everything the tunnel created. The connector goes first,
+// because Cloudflare will not delete a tunnel that still has live connections.
+// DNS cleanup is independent, but the Access application is retained until
+// the tunnel has been deleted successfully. A failed connector removal skips
+// tunnel and Access deletion. All failures are returned together so the finalizer stays
+// until everything is gone, and the IDs stay in status so a retry finds what is
+// left. Every step is idempotent.
 func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
 	if t.Status.TunnelID == "" {
 		return nil
 	}
 	if err := r.deleteConnector(ctx, t); err != nil {
-		return fmt.Errorf("removing connector: %w", err)
+		// Without this the tunnel cannot be deleted. DNS can still be removed,
+		// but the Access application is retained while the tunnel remains.
+		connectorErr := fmt.Errorf("removing connector: %w", err)
+		return errors.Join(connectorErr, r.cleanupCloudflare(ctx, t, false))
 	}
+	return r.cleanupCloudflare(ctx, t, true)
+}
+
+// cleanupCloudflare attempts DNS cleanup and tunnel deletion independently.
+// The Access application is deleted only after tunnel deletion succeeds; when
+// connector removal failed and deleteTunnel is false, the application is kept.
+func (r *AgentEdgeTunnelReconciler) cleanupCloudflare(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, deleteTunnel bool) error {
+	var errs []error
 	if t.Status.Hostname != "" {
 		if err := r.CloudflareClient.DeleteDNSRecord(ctx, t.Spec.Cloudflare.ZoneID, t.Status.Hostname, t.Status.TunnelID); err != nil {
-			return fmt.Errorf("deleting DNS record: %w", err)
+			errs = append(errs, fmt.Errorf("deleting DNS record: %w", err))
 		}
 	}
-	if t.Status.AccessAppID != "" {
+	tunnelDeleted := false
+	if deleteTunnel {
+		if err := r.CloudflareClient.DeleteTunnel(ctx, t.Status.TunnelID); err != nil {
+			errs = append(errs, fmt.Errorf("deleting tunnel: %w", err))
+		} else {
+			tunnelDeleted = true
+		}
+	}
+	if deleteTunnel && tunnelDeleted && t.Status.AccessAppID != "" {
 		if err := r.CloudflareClient.DeleteAccessApplication(ctx, r.AccountID, t.Status.AccessAppID); err != nil {
-			return fmt.Errorf("deleting Access application: %w", err)
+			errs = append(errs, fmt.Errorf("deleting Access application: %w", err))
 		}
 	}
-	if err := r.CloudflareClient.DeleteTunnel(ctx, t.Status.TunnelID); err != nil {
-		return fmt.Errorf("deleting tunnel: %w", err)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // --- connector workload -----------------------------------------------------

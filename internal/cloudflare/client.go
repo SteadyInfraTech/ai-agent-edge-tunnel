@@ -20,8 +20,8 @@ const DryRunIDPrefix = "dryrun-"
 // IsDryRunID reports whether id was issued by the in-memory fake.
 func IsDryRunID(id string) bool { return strings.HasPrefix(id, DryRunIDPrefix) }
 
-// TunnelInfo describes a tunnel as returned by Cloudflare, including the
-// secret and token, which are only available at creation.
+// TunnelInfo describes a tunnel as returned by Cloudflare. The secret is
+// generated before creation and stored immediately in the connector Secret.
 type TunnelInfo struct {
 	// AccountID is the Cloudflare account that owns the tunnel.
 	AccountID string
@@ -29,11 +29,32 @@ type TunnelInfo struct {
 	Name      string
 	Secret    string
 	Hostname  string
-	Token     string
+}
+
+// TunnelRef identifies an existing tunnel.
+type TunnelRef struct {
+	ID   string
+	Name string
+}
+
+// AccessAppRef identifies an existing Access application.
+type AccessAppRef struct {
+	ID string
+	// HasAllowPolicy is true when the application has at least one allow
+	// policy. An application without one lets nobody in, so it is a leftover
+	// from an attempt that stopped before attaching the policy.
+	HasAllowPolicy bool
 }
 
 type TunnelService interface {
 	CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error)
+	// FindTunnels returns the tunnels that exist (not deleted) with exactly this
+	// name. The name is only a lookup key; the controller must establish ownership
+	// independently before adopting or deleting a match.
+	FindTunnels(ctx context.Context, name string) ([]TunnelRef, error)
+	// FindAccessApplications returns the Access applications of accountID whose
+	// name and domain both equal the given values.
+	FindAccessApplications(ctx context.Context, accountID, name, domain string) ([]AccessAppRef, error)
 	CreateDNSRecord(ctx context.Context, zoneID, hostname, tunnelID string) error
 	// CreateAccessPolicy creates an Access application for domain with an allow
 	// policy for the given emails and returns the application ID. If the policy
@@ -69,8 +90,8 @@ func NewRealCloudflareClient(accountID, apiToken string) (*RealCloudflareClient,
 	}, nil
 }
 
-// CreateTunnel creates a locally managed tunnel and returns its ID, credentials
-// and token. Cloudflare returns the secret only once.
+// CreateTunnel creates a locally managed tunnel and returns its ID and
+// credentials. The secret is generated locally and stored only in the connector Secret.
 func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error) {
 	// Generate a cryptographically secure 32-byte secret and base64-encode it
 	secretBytes := make([]byte, 32)
@@ -86,19 +107,12 @@ func (c *RealCloudflareClient) CreateTunnel(ctx context.Context, name string) (*
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare API tunnel creation failed: %w", err)
 	}
-
-	token, err := c.api.GetTunnelToken(ctx, cloudflare.AccountIdentifier(c.AccountID), tunnel.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch tunnel token: %w", err)
-	}
-
 	return &TunnelInfo{
 		AccountID: c.AccountID,
 		ID:        tunnel.ID,
 		Name:      tunnel.Name,
 		Secret:    secret,
 		Hostname:  tunnelTarget(tunnel.ID),
-		Token:     token,
 	}, nil
 }
 
@@ -268,4 +282,65 @@ func (c *RealCloudflareClient) DeleteDNSRecord(ctx context.Context, zoneID, host
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// FindTunnels lists the tunnels named exactly name that are not deleted.
+func (c *RealCloudflareClient) FindTunnels(ctx context.Context, name string) ([]TunnelRef, error) {
+	var out []TunnelRef
+	params := cloudflare.TunnelListParams{
+		Name:       name,
+		IsDeleted:  cloudflare.BoolPtr(false),
+		ResultInfo: cloudflare.ResultInfo{PerPage: 100, Page: 1},
+	}
+	for {
+		tunnels, info, err := c.api.ListTunnels(ctx, cloudflare.AccountIdentifier(c.AccountID), params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list Cloudflare tunnels named %q: %w", name, err)
+		}
+		for _, t := range tunnels {
+			// The filter is applied by Cloudflare; checking again means a
+			// changed filter semantic can never make us act on someone else's tunnel.
+			if t.Name == name && t.DeletedAt == nil {
+				out = append(out, TunnelRef{ID: t.ID, Name: t.Name})
+			}
+		}
+		if info == nil || !info.HasMorePages() {
+			return out, nil
+		}
+		params.ResultInfo = info.Next()
+	}
+}
+
+// FindAccessApplications lists the Access applications whose name and domain
+// both match, and whether each has an allow policy.
+func (c *RealCloudflareClient) FindAccessApplications(ctx context.Context, accountID, name, domain string) ([]AccessAppRef, error) {
+	var out []AccessAppRef
+	rc := cloudflare.AccountIdentifier(accountID)
+	params := cloudflare.ListAccessApplicationsParams{ResultInfo: cloudflare.ResultInfo{PerPage: 100, Page: 1}}
+	for {
+		apps, info, err := c.api.ListAccessApplications(ctx, rc, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list Access applications: %w", err)
+		}
+		for _, app := range apps {
+			if app.Name != name || app.Domain != domain {
+				continue
+			}
+			policies, _, err := c.api.ListAccessPolicies(ctx, rc, cloudflare.ListAccessPoliciesParams{ApplicationID: app.ID})
+			if err != nil {
+				return nil, fmt.Errorf("failed to list policies of Access application %s: %w", app.ID, err)
+			}
+			ref := AccessAppRef{ID: app.ID}
+			for _, pol := range policies {
+				if pol.Decision == "allow" && len(pol.Include) > 0 {
+					ref.HasAllowPolicy = true
+				}
+			}
+			out = append(out, ref)
+		}
+		if info == nil || !info.HasMorePages() {
+			return out, nil
+		}
+		params.ResultInfo = info.Next()
+	}
 }
