@@ -411,10 +411,10 @@ func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context
 	return nil
 }
 
-// namesAreOwned reports whether tunnelName(t) identifies this object alone. It
-// ends in the first characters of the object's UID, so a tunnel or Access
-// application with that name was created for this object, not for another that
-// reuses the name. Without a UID (only in tests) nothing can be claimed.
+// namesAreOwned reports whether t has enough UID data to construct its
+// deterministic Cloudflare resource name. The truncated UID suffix is only a
+// lookup filter, not proof of ownership; recoverTunnel and recoverAccessApp
+// must still require independent evidence before adopting or deleting matches.
 func namesAreOwned(t *agentopsv1alpha1.AgentEdgeTunnel) bool {
 	return len(t.UID) >= 8
 }
