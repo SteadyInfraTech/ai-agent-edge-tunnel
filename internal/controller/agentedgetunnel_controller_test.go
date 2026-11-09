@@ -763,6 +763,27 @@ func TestOrphanTunnelWhoseSecretNamesAnotherTunnelIsLeftUntouched(t *testing.T) 
 	assert.Empty(t, h.get().Status.TunnelID)
 }
 
+// TestOrphanTunnelWithUncontrolledMatchingSecretIsLeftUntouched verifies that
+// matching credentials do not establish ownership when the Secret is not
+// controlled by this AgentEdgeTunnel.
+func TestOrphanTunnelWithUncontrolledMatchingSecretIsLeftUntouched(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	var oldID string
+	for id := range h.cf.Tunnels {
+		oldID = id
+	}
+	sec, err := h.secret()
+	require.NoError(t, err)
+	sec.OwnerReferences = nil
+	require.NoError(t, h.k8s.Update(context.Background(), sec))
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership cannot be established")
+	assert.Contains(t, h.cf.Tunnels, oldID, "the candidate tunnel must remain untouched")
+	assert.Empty(t, h.get().Status.TunnelID)
+}
+
 // TestTunnelNamedForAnotherObjectIsNeverTouched checks that only the tunnel named for this object's UID is recovered.
 func TestTunnelNamedForAnotherObjectIsNeverTouched(t *testing.T) {
 	h := newHarness(t, nil)
