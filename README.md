@@ -160,7 +160,7 @@ kubectl -n edge-tunnel-system create secret generic edge-tunnel-cloudflare \
 kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
   --from-literal=EDGE_BASE_DOMAIN=agents.example.com \
   --from-literal=CLOUDFLARE_ZONE_ID=<zone-id> \
-  --from-literal=CLOUDFLARE_ZONE_NAME=example.com \\
+  --from-literal=CLOUDFLARE_ZONE_NAME=example.com \
   --from-literal=CONNECTOR_IMAGE=<pinned cloudflared image> \
   --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public
 make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
