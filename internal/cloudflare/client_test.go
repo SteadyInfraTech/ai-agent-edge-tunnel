@@ -137,7 +137,6 @@ func TestLiveCloudflareTunnel(t *testing.T) {
 	}
 }
 
-
 // TestRealVerifyAccessPolicy verifies the complete policy surface through the
 // Cloudflare SDK and a local HTTP server, without live credentials.
 func TestRealVerifyAccessPolicy(t *testing.T) {

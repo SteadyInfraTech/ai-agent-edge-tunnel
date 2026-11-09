@@ -1083,7 +1083,6 @@ func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
 	}
 }
 
-
 // TestActiveTunnelKeepsResourcesWhenAccessVerificationFails verifies that a
 // transient Cloudflare API error is not mistaken for confirmed policy drift.
 func TestActiveTunnelKeepsResourcesWhenAccessVerificationFails(t *testing.T) {
