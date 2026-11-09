@@ -103,8 +103,48 @@ Early `v1alpha1`.
 |---|---|
 | Implemented | Tunnel, Access policy, DNS and cloudflared connector per object; TTL (clock starts when Active); finalizer cleanup that retries; leader election, health probes, metrics |
 | Not implemented | Edge HMAC webhook validation; Access service tokens; `cleanupOnFinish`; reacting to the target pod finishing; more than one connector replica |
-| Known limits | Namespace quotas are not implemented; by default there is no operator-imposed tunnel count limit. Cloudflare account capacity and API rate limits remain the external constraints. A crash between creating a Cloudflare resource and recording its ID can leave an orphan. A tunnel is recovered only when its connector Secret is still controlled by the same AgentEdgeTunnel and contains credentials naming that tunnel; otherwise reconciliation stops and the tunnel must be resolved manually. Matching Access applications cannot currently be proven to belong to an object because Cloudflare's lookup exposes no owner identity, so they are left untouched and require operator resolution rather than being adopted or deleted. Resources whose owner object is gone are not swept and must be removed by hand. Cleanup removes DNS independently, deletes the tunnel only after connector removal succeeds, and deletes Access only after tunnel deletion succeeds. The connector Secret cannot be regenerated because Cloudflare returns tunnel credentials only once: if it is deleted, delete and recreate the object. Access applications are created per object, so very large numbers of tunnels count against your Cloudflare plan's limits. |
+| Known limits | Namespace quotas are opt-in through a NamespaceTunnelQuota resource; namespaces without one remain unlimited. Cloudflare account capacity and API rate limits remain the external constraints. A crash between creating a Cloudflare resource and recording its ID can leave an orphan. A tunnel is recovered only when its connector Secret is still controlled by the same AgentEdgeTunnel and contains credentials naming that tunnel; otherwise reconciliation stops and the tunnel must be resolved manually. Matching Access applications cannot currently be proven to belong to an object because Cloudflare's lookup exposes no owner identity, so they are left untouched and require operator resolution rather than being adopted or deleted. Resources whose owner object is gone are not swept and must be removed by hand. Cleanup removes DNS independently, deletes the tunnel only after connector removal succeeds, and deletes Access only after tunnel deletion succeeds. The connector Secret cannot be regenerated because Cloudflare returns tunnel credentials only once: if it is deleted, delete and recreate the object. Access applications are created per object, so very large numbers of tunnels count against your Cloudflare plan's limits. |
 | Deprecated | `spec.targetPodSelector` is ignored; use `spec.service` |
+
+
+## Namespace tunnel quotas
+
+Tunnel quotas are opt-in and namespace-scoped. Without a `NamespaceTunnelQuota`
+object, the operator imposes no tunnel-count limit. These Kubernetes quotas
+only constrain this operator's admission within a namespace; they do not limit
+Cloudflare account-wide tunnel capacity or Cloudflare API rate limits. To cap a
+namespace at 25 tunnels, an administrator applies:
+
+```yaml
+apiVersion: edge.steadyinfra.com/v1alpha1
+kind: NamespaceTunnelQuota
+metadata:
+  name: default
+  namespace: agents
+spec:
+  limit: 25
+```
+
+The object name is `default`; create at most one quota object per namespace.
+A limit of zero blocks new admissions. Existing provisioned tunnels are
+grandfathered when a quota is introduced or lowered; lowering a limit never
+terminates running tunnels, but prevents new reservations until usage falls
+below the limit.
+
+Admission is reserved before the operator creates any Cloudflare resource.
+Reservations are keyed by Kubernetes object UID and stored in the quota
+status subresource. Updates use API-server resource versions as an atomic
+compare-and-swap, so simultaneous creates cannot claim the same remaining
+slot. Retries reuse the same reservation. The reservation remains held while
+provisioning is retried and is released only after Cloudflare and connector
+cleanup succeeds. A failed cleanup therefore retains both the finalizer and
+the quota slot for a later retry.
+
+The operator's RBAC grants it read access to quota specs and write access only
+to quota status. Restrict creation, updates, and deletion of `NamespaceTunnelQuota`
+objects to trusted namespace administrators: changing `spec.limit` is an
+administrative capacity decision. The namespaced installation grants these
+permissions only inside each configured managed namespace.
 
 ## Project Structure
 

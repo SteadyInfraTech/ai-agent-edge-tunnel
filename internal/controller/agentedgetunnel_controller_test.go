@@ -63,7 +63,7 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 	k8s := fakeclient.NewClientBuilder().
 		WithScheme(scheme.Scheme).
 		WithObjects(append([]client.Object{cr}, objs...)...).
-		WithStatusSubresource(cr, &appsv1.Deployment{}).
+		WithStatusSubresource(cr, &appsv1.Deployment{}, &agentopsv1alpha1.NamespaceTunnelQuota{}).
 		Build()
 	h := &harness{
 		t:   t,
