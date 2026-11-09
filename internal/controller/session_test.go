@@ -254,8 +254,8 @@ func TestActiveSessionTunnelRequeuesAtThePollInterval(t *testing.T) {
 }
 
 // TestSessionPolicyRevocationPrecedesSessionRead verifies that operator
- // policy revocation cleans up a provisioned tunnel before session state is
- // consulted, even if the referenced session has independently ended.
+// policy revocation cleans up a provisioned tunnel before session state is
+// consulted, even if the referenced session has independently ended.
 func TestSessionPolicyRevocationPrecedesSessionRead(t *testing.T) {
 	h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
 	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
