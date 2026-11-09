@@ -53,14 +53,15 @@ func TestNamespaceQuotaExistingReservationSkipsNamespaceList(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
 		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
-		Status: agentopsv1alpha1.NamespaceTunnelQuotaStatus{
-			Reservations: []agentopsv1alpha1.TunnelReservation{{Name: "test-agent-tunnel", UID: "11111111-aaaa-bbbb-cccc-222222222222"}},
-		},
 	}
 	h := newHarness(t, nil, quota)
+	var stored agentopsv1alpha1.NamespaceTunnelQuota
+	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &stored))
+	stored.Status.Reservations = []agentopsv1alpha1.TunnelReservation{{Name: "test-agent-tunnel", UID: "11111111-aaaa-bbbb-cccc-222222222222"}}
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &stored))
+
 	reader := &countingQuotaReader{Reader: h.k8s}
 	h.r.APIReader = reader
-
 	tunnel := h.get()
 	require.NoError(t, h.r.ensureQuotaReservation(context.Background(), &tunnel, false))
 	require.Zero(t, reader.listCalls, "an existing reservation must return before listing namespace tunnels")
