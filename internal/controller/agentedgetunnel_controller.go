@@ -57,6 +57,12 @@ type AgentEdgeTunnelReconciler struct {
 	CloudflareClient cf.TunnelService
 	// AccountID is the Cloudflare account used for Access applications.
 	AccountID string
+	// ZoneID pins every AgentEdgeTunnel to the single Cloudflare zone configured
+	// for this operator instance. Per-object zone IDs are requests, not authority.
+	ZoneID string
+	// PublicNamespaces is the explicit allowlist for unauthenticated tunnels.
+	// An empty map denies public tunnels in every namespace.
+	PublicNamespaces map[string]struct{}
 	// BaseDomain is the domain under which hostnames are created, e.g.
 	// "agents.example.com". Required.
 	BaseDomain string
@@ -117,8 +123,25 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
+	// Existing Cloudflare resources must be checked against current operator
+	// policy before reading their AgentSession. A revoked public namespace or
+	// changed zone takes precedence over session state and triggers cleanup.
+	if tunnel.Status.TunnelID != "" {
+		if err := r.validateOperatorPolicy(&tunnel); err != nil {
+			return ctrl.Result{}, r.terminate(ctx, &tunnel, "operator security policy changed; resources removed: "+err.Error())
+		}
+	}
+
 	if res, done, err := r.reconcileSession(ctx, &tunnel); done {
 		return res, err
+	}
+
+	// Keep the policy check for objects without recorded tunnel IDs, before
+	// provisioning can create any Cloudflare resources.
+	if err := r.validateOperatorPolicy(&tunnel); err != nil {
+		tunnel.Status.Phase = agentopsv1alpha1.PhaseFailed
+		tunnel.Status.Message = err.Error()
+		return ctrl.Result{}, r.Status().Update(ctx, &tunnel)
 	}
 
 	if tunnel.Status.Phase == agentopsv1alpha1.PhaseActive {
@@ -855,6 +878,23 @@ func validate(t *agentopsv1alpha1.AgentEdgeTunnel) (time.Duration, error) {
 		return 0, errors.New("security.allowedEmails and security.allowPublic are mutually exclusive")
 	}
 	return ttl, nil
+}
+
+// validateOperatorPolicy applies restrictions that are controlled by the
+// operator administrator rather than by an individual AgentEdgeTunnel author.
+func (r *AgentEdgeTunnelReconciler) validateOperatorPolicy(t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	if r.ZoneID == "" {
+		return errors.New("operator Cloudflare zone is not configured; set CLOUDFLARE_ZONE_ID")
+	}
+	if t.Spec.Cloudflare.ZoneID != r.ZoneID {
+		return fmt.Errorf("spec.cloudflare.zoneID does not match the operator's configured Cloudflare zone; this operator is pinned to zone %q", r.ZoneID)
+	}
+	if t.Spec.Security.AllowPublic {
+		if _, allowed := r.PublicNamespaces[t.Namespace]; !allowed {
+			return fmt.Errorf("security.allowPublic is not permitted in namespace %q; add the namespace to EDGE_PUBLIC_NAMESPACES to authorize unauthenticated tunnels", t.Namespace)
+		}
+	}
+	return nil
 }
 
 // hostname returns the public hostname for t under the configured base domain.

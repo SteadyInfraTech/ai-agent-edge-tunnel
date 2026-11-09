@@ -77,6 +77,7 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 		Scheme:           scheme.Scheme,
 		CloudflareClient: h.cf,
 		AccountID:        "fake-account",
+		ZoneID:           "zone",
 		BaseDomain:       "agents.example.com",
 		ConnectorImage:   testImage,
 		// The harness uses the in-memory fake, which is what --dry-run runs on.
@@ -233,6 +234,7 @@ func TestPublicTunnelSkipsAccess(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
 		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
 	})
+	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
 
 	_, err := h.reconcile()
 	require.NoError(t, err)
@@ -965,4 +967,76 @@ func TestConnectorRemovalFailureRetainsAccessApplication(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, h.cf.Tunnels)
 	assert.Empty(t, h.cf.AccessApps)
+}
+
+// TestZoneMismatchFailsBeforeProvisioning ensures CR authors cannot choose
+// an arbitrary Cloudflare zone through spec.cloudflare.zoneID.
+func TestZoneMismatchFailsBeforeProvisioning(t *testing.T) {
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) { cr.Spec.Cloudflare.ZoneID = "another-zone" })
+	_, err := h.reconcile()
+	require.NoError(t, err, "a policy violation is recorded rather than retried")
+	assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "does not match the operator's configured Cloudflare zone")
+	assert.Zero(t, h.cf.CreateTunnelCalls)
+}
+
+// TestPublicTunnelRequiresNamespaceAllowlist ensures allowPublic is not an
+// authorization decision available to every namespace by default.
+func TestPublicTunnelRequiresNamespaceAllowlist(t *testing.T) {
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
+		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
+	})
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "not permitted in namespace")
+	assert.Zero(t, h.cf.CreateTunnelCalls)
+}
+
+// TestPublicTunnelAllowedOnlyInConfiguredNamespace covers the positive case
+// and proves that the allowlist is namespace-specific.
+func TestPublicTunnelAllowedOnlyInConfiguredNamespace(t *testing.T) {
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
+		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
+	})
+	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls)
+}
+
+// TestRevokingPublicNamespaceCleansUpExistingTunnel verifies that changing
+// operator policy also removes already-provisioned public endpoints.
+func TestRevokingPublicNamespaceCleansUpExistingTunnel(t *testing.T) {
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
+		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
+	})
+	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	require.Len(t, h.cf.Tunnels, 1)
+
+	h.r.PublicNamespaces = nil
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.DNSRecords)
+	assert.Empty(t, h.cf.AccessApps)
+}
+
+// TestPublicNamespaceAllowlistUsesExactNames prevents prefix or suffix
+// matches from granting unauthenticated access to an unintended namespace.
+func TestPublicNamespaceAllowlistUsesExactNames(t *testing.T) {
+	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
+		cr.Namespace = "agent-public-extra"
+		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
+	})
+	h.r.PublicNamespaces = map[string]struct{}{"agent-public": {}}
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+	assert.Zero(t, h.cf.CreateTunnelCalls)
 }

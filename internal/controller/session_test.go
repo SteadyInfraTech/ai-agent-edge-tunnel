@@ -252,3 +252,39 @@ func TestActiveSessionTunnelRequeuesAtThePollInterval(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, sessionPollInterval, res.RequeueAfter)
 }
+
+// TestSessionPolicyRevocationPrecedesSessionRead verifies that operator
+// policy revocation cleans up a provisioned tunnel before session state is
+// consulted, even if the referenced session has independently ended.
+func TestSessionPolicyRevocationPrecedesSessionRead(t *testing.T) {
+	h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
+	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
+	cr := h.get()
+	cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
+	require.NoError(t, h.k8s.Update(context.Background(), &cr))
+
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	require.NotEmpty(t, h.get().Status.TunnelID)
+
+	// Revoke the namespace and end the session simultaneously. The operator
+	// policy must be evaluated first, rather than allowing session termination
+	// to mask the security-policy reason.
+	h.r.PublicNamespaces = nil
+	setSession(t, h, func(u *unstructured.Unstructured) {
+		require.NoError(t, unstructured.SetNestedField(u.Object, "Completed", "status", "phase"))
+	})
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, got.Status.Phase)
+	assert.Contains(t, got.Status.Message, "operator security policy changed")
+	assert.NotContains(t, got.Status.Message, "AgentSession ended")
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.DNSRecords)
+	assert.Empty(t, h.cf.AccessApps)
+	h.assertConnectorGone()
+}
