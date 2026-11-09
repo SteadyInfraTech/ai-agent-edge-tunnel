@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
@@ -92,4 +94,67 @@ func TestNamespaceQuotaReservationReleasedAfterTerminationCleanup(t *testing.T) 
 	require.Empty(t, stored.Status.Reservations)
 	require.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
 	require.Empty(t, h.cf.Tunnels)
+}
+
+func TestNamespaceQuotaConcurrentAdmissionsCannotOversubscribe(t *testing.T) {
+	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+	}
+	h := newHarness(t, nil, quota)
+	tunnels := []*agentopsv1alpha1.AgentEdgeTunnel{
+		{ObjectMeta: metav1.ObjectMeta{Name: "concurrent-a", Namespace: "default", UID: types.UID("aaaaaaaa-aaaa-bbbb-cccc-aaaaaaaaaaaa")}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "concurrent-b", Namespace: "default", UID: types.UID("bbbbbbbb-bbbb-bbbb-cccc-bbbbbbbbbbbb")}},
+	}
+	for _, tunnel := range tunnels {
+		require.NoError(t, h.k8s.Create(context.Background(), tunnel))
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, len(tunnels))
+	var wg sync.WaitGroup
+	for _, tunnel := range tunnels {
+		wg.Add(1)
+		go func(tunnel *agentopsv1alpha1.AgentEdgeTunnel) {
+			defer wg.Done()
+			<-start
+			errs <- h.r.ensureQuotaReservation(context.Background(), tunnel, false)
+		}(tunnel)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	admitted, rejected := 0, 0
+	for err := range errs {
+		if err == nil {
+			admitted++
+		} else {
+			require.True(t, strings.Contains(err.Error(), "quota exhausted"), "unexpected admission error: %v", err)
+			rejected++
+		}
+	}
+	require.Equal(t, 1, admitted)
+	require.Equal(t, 1, rejected)
+
+	var stored agentopsv1alpha1.NamespaceTunnelQuota
+	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &stored))
+	require.Len(t, stored.Status.Reservations, 1)
+}
+
+func TestNamespaceQuotaPrunesReservationsForDeletedObjects(t *testing.T) {
+	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+		Status: agentopsv1alpha1.NamespaceTunnelQuotaStatus{
+			Reservations: []agentopsv1alpha1.TunnelReservation{{Name: "deleted", UID: "deleted-object-uid"}},
+		},
+	}
+	h := newHarness(t, nil, quota)
+	tunnel := h.get()
+	require.NoError(t, h.r.ensureQuotaReservation(context.Background(), &tunnel, false))
+	var stored agentopsv1alpha1.NamespaceTunnelQuota
+	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &stored))
+	require.Len(t, stored.Status.Reservations, 1)
+	require.Equal(t, string(tunnel.UID), stored.Status.Reservations[0].UID)
 }
