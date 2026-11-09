@@ -261,7 +261,7 @@ func TestSessionPolicyRevocationPrecedesSessionRead(t *testing.T) {
 	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
 	cr := h.get()
 	cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
-	require.NoError(t, h.k8s.Update(context.Background(), cr))
+	require.NoError(t, h.k8s.Update(context.Background(), &cr))
 
 	_, err := h.reconcile()
 	require.NoError(t, err)
