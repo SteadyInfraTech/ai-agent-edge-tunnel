@@ -420,11 +420,11 @@ func namesAreOwned(t *agentopsv1alpha1.AgentEdgeTunnel) bool {
 }
 
 // recoverTunnel looks for a tunnel that an earlier attempt created for t but
-// never recorded in status. A tunnel is returned for adoption only when it can
-// still be used: Cloudflare shows the tunnel secret once, so a tunnel is usable
-// only if the connector Secret this operator wrote for it still exists and names
-// it (or if no connector is wanted). Any other tunnel with t's name was created
-// for t and cannot be used, so it is deleted and the caller creates a fresh one.
+// never recorded in status. A matching name is not proof of ownership. Recovery
+// is allowed only when the connector Secret is controlled by t and contains
+// credentials naming the candidate tunnel. If that evidence is absent or
+// mismatched, recovery stops and requires operator resolution; it never deletes
+// a same-name tunnel based on a failed ownership check.
 func (r *AgentEdgeTunnelReconciler) recoverTunnel(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (*cf.TunnelRef, error) {
 	if !namesAreOwned(t) {
 		return nil, nil
@@ -433,32 +433,29 @@ func (r *AgentEdgeTunnelReconciler) recoverTunnel(ctx context.Context, t *agento
 	if err != nil {
 		return nil, fmt.Errorf("looking for a tunnel from an earlier attempt: %w", err)
 	}
-	var adopt *cf.TunnelRef
-	for i := range found {
-		ref := found[i]
-		if adopt == nil {
-			ok, err := r.credentialsMatch(ctx, t, ref.ID)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				adopt = &ref
-				continue
-			}
-		}
-		log.FromContext(ctx).Info("Deleting an unusable tunnel from an earlier attempt", "tunnelID", ref.ID, "tunnelName", ref.Name)
-		if err := r.CloudflareClient.DeleteTunnel(ctx, ref.ID); err != nil {
-			return nil, fmt.Errorf("deleting an unusable tunnel from an earlier attempt: %w", err)
-		}
+	if len(found) == 0 {
+		return nil, nil
 	}
-	return adopt, nil
+	if len(found) > 1 {
+		return nil, fmt.Errorf("found %d Cloudflare tunnels named %q; ownership is ambiguous and requires operator resolution", len(found), tunnelName(t))
+	}
+	ref := found[0]
+	ok, err := r.credentialsMatch(ctx, t, ref.ID)
+	if err != nil {
+		return nil, fmt.Errorf("verifying ownership of Cloudflare tunnel %s: %w", ref.ID, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("Cloudflare tunnel %q (%s) matches this AgentEdgeTunnel's name, but ownership cannot be established; leave it untouched and resolve it manually", ref.Name, ref.ID)
+	}
+	return &ref, nil
 }
 
-// credentialsMatch reports whether the connector credentials stored for t are
-// those of tunnelID. With no connector there is nothing to match.
+// credentialsMatch reports whether the connector Secret controlled by t contains
+// credentials for tunnelID. Without a connector Secret there is no independent
+// ownership evidence, so recovery must not adopt or delete a same-name tunnel.
 func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, tunnelID string) (bool, error) {
 	if !hasConnector(t) {
-		return true, nil
+		return false, nil
 	}
 	var s corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &s); err != nil {
@@ -514,12 +511,11 @@ func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentop
 }
 
 // recoverAccessApp looks for an Access application that an earlier attempt
-// created for t but never recorded. One with an allow policy is adopted: it was
-// created complete, and deleting it would leave a live hostname unprotected. One
-// without a policy lets nobody in and only exists because the earlier attempt
-// stopped before attaching it, which happens before DNS is created, so it is
-// deleted and the caller creates a complete one. Returns "" when there is nothing
-// to adopt.
+// may have created for t but never recorded. Cloudflare's application lookup
+// exposes name and domain, not an owner identity; neither is sufficient proof
+// that this object created the application. Therefore every match is left
+// untouched and recovery stops for operator resolution. This deliberately
+// avoids adopting a pre-existing application or deleting an active one.
 func (r *AgentEdgeTunnelReconciler) recoverAccessApp(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (string, error) {
 	if !namesAreOwned(t) {
 		return "", nil
@@ -528,19 +524,14 @@ func (r *AgentEdgeTunnelReconciler) recoverAccessApp(ctx context.Context, t *age
 	if err != nil {
 		return "", fmt.Errorf("looking for an Access application from an earlier attempt: %w", err)
 	}
-	adopt := ""
-	for _, app := range found {
-		if adopt == "" && app.HasAllowPolicy {
-			adopt = app.ID
-			log.FromContext(ctx).Info("Adopted an Access application from an earlier attempt", "appID", app.ID)
-			continue
+	if len(found) > 0 {
+		ids := make([]string, 0, len(found))
+		for _, app := range found {
+			ids = append(ids, app.ID)
 		}
-		log.FromContext(ctx).Info("Deleting an incomplete Access application from an earlier attempt", "appID", app.ID)
-		if err := r.CloudflareClient.DeleteAccessApplication(ctx, r.AccountID, app.ID); err != nil {
-			return "", fmt.Errorf("deleting an incomplete Access application from an earlier attempt: %w", err)
-		}
+		return "", fmt.Errorf("found matching Cloudflare Access application(s) %s for %q, but ownership and policy identity cannot be established; leave them untouched and resolve them manually", strings.Join(ids, ", "), t.Status.Hostname)
 	}
-	return adopt, nil
+	return "", nil
 }
 
 // cleanup removes everything the tunnel created. The connector goes first,
@@ -563,8 +554,9 @@ func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1al
 	return r.cleanupCloudflare(ctx, t, true)
 }
 
-// cleanupCloudflare deletes the DNS record and the Access application, and the
-// tunnel itself when deleteTunnel is set, returning every failure.
+// cleanupCloudflare attempts DNS cleanup and tunnel deletion independently.
+// The Access application is deleted only after tunnel deletion succeeds; when
+// connector removal failed and deleteTunnel is false, the application is kept.
 func (r *AgentEdgeTunnelReconciler) cleanupCloudflare(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, deleteTunnel bool) error {
 	var errs []error
 	if t.Status.Hostname != "" {
@@ -572,14 +564,17 @@ func (r *AgentEdgeTunnelReconciler) cleanupCloudflare(ctx context.Context, t *ag
 			errs = append(errs, fmt.Errorf("deleting DNS record: %w", err))
 		}
 	}
-	if t.Status.AccessAppID != "" {
-		if err := r.CloudflareClient.DeleteAccessApplication(ctx, r.AccountID, t.Status.AccessAppID); err != nil {
-			errs = append(errs, fmt.Errorf("deleting Access application: %w", err))
-		}
-	}
+	tunnelDeleted := false
 	if deleteTunnel {
 		if err := r.CloudflareClient.DeleteTunnel(ctx, t.Status.TunnelID); err != nil {
 			errs = append(errs, fmt.Errorf("deleting tunnel: %w", err))
+		} else {
+			tunnelDeleted = true
+		}
+	}
+	if deleteTunnel && tunnelDeleted && t.Status.AccessAppID != "" {
+		if err := r.CloudflareClient.DeleteAccessApplication(ctx, r.AccountID, t.Status.AccessAppID); err != nil {
+			errs = append(errs, fmt.Errorf("deleting Access application: %w", err))
 		}
 	}
 	return errors.Join(errs...)
