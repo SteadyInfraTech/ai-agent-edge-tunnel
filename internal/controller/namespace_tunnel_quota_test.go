@@ -146,7 +146,7 @@ func TestNamespaceQuotaPrunesReservationsForDeletedObjects(t *testing.T) {
 	quota := &agentopsv1alpha1.NamespaceTunnelQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
 		Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
-			}
+	}
 	h := newHarness(t, nil, quota)
 	var seeded agentopsv1alpha1.NamespaceTunnelQuota
 	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "default"}, &seeded))
