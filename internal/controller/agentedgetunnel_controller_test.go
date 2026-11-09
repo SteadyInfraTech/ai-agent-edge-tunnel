@@ -777,6 +777,12 @@ func TestOrphanTunnelWithUncontrolledMatchingSecretIsLeftUntouched(t *testing.T)
 	sec.OwnerReferences = nil
 	require.NoError(t, h.k8s.Update(context.Background(), sec))
 
+	// Exercise credentialsMatch directly: reconcile rejects this unmanaged
+	// Secret earlier in checkConnectorSecretFree.
+	ok, err := h.r.credentialsMatch(context.Background(), h.get(), oldID)
+	require.NoError(t, err)
+	assert.False(t, ok, "matching credentials in an uncontrolled Secret are not ownership evidence")
+
 	_, err = h.reconcile()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not managed by this AgentEdgeTunnel")
