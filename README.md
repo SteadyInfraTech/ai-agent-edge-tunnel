@@ -72,7 +72,13 @@ unstructured, so this operator does not depend on agentops-operator and starts w
 ## Security model
 
 - **Never public by omission.** Set `security.allowedEmails`, or opt in with `security.allowPublic: true`
-  (for example a webhook receiver). Neither, or both, is rejected.
+  (for example a webhook receiver). Neither, or both, is rejected. Public tunnels additionally require the
+  object's namespace to appear in the operator's `EDGE_PUBLIC_NAMESPACES` allowlist; an empty allowlist
+  denies public tunnels everywhere. Removing a namespace from the allowlist causes its existing public
+  tunnels to be cleaned up and marked `Terminated`.
+- **One configured Cloudflare zone.** `CLOUDFLARE_ZONE_ID` is required at startup. The operator rejects
+  objects whose `spec.cloudflare.zoneID` differs, preventing tenants from selecting another zone through
+  their custom resource. Configure `EDGE_BASE_DOMAIN` to a domain served by that zone.
 - **Unimplemented protections are rejected, not ignored.** `security.webhookValidation` (edge HMAC checks) and
   `security.serviceTokens` are not implemented yet; setting them fails validation so nobody believes a
   protection is active when it is not.
@@ -97,7 +103,7 @@ Early `v1alpha1`.
 |---|---|
 | Implemented | Tunnel, Access policy, DNS and cloudflared connector per object; TTL (clock starts when Active); finalizer cleanup that retries; leader election, health probes, metrics |
 | Not implemented | Edge HMAC webhook validation; Access service tokens; `cleanupOnFinish`; reacting to the target pod finishing; more than one connector replica |
-| Known limits | A crash between creating a Cloudflare resource and recording its ID can leave an orphan. A tunnel is recovered only when its connector Secret is still controlled by the same AgentEdgeTunnel and contains credentials naming that tunnel; otherwise reconciliation stops and the tunnel must be resolved manually. Matching Access applications cannot currently be proven to belong to an object because Cloudflare's lookup exposes no owner identity, so they are left untouched and require operator resolution rather than being adopted or deleted. Resources whose owner object is gone are not swept and must be removed by hand. Cleanup removes DNS independently, deletes the tunnel only after connector removal succeeds, and deletes Access only after tunnel deletion succeeds. The connector Secret cannot be regenerated because Cloudflare returns tunnel credentials only once: if it is deleted, delete and recreate the object. Access applications are created per object, so very large numbers of tunnels count against your Cloudflare plan's limits. |
+| Known limits | Namespace quotas are not implemented; by default there is no operator-imposed tunnel count limit. Cloudflare account capacity and API rate limits remain the external constraints. A crash between creating a Cloudflare resource and recording its ID can leave an orphan. A tunnel is recovered only when its connector Secret is still controlled by the same AgentEdgeTunnel and contains credentials naming that tunnel; otherwise reconciliation stops and the tunnel must be resolved manually. Matching Access applications cannot currently be proven to belong to an object because Cloudflare's lookup exposes no owner identity, so they are left untouched and require operator resolution rather than being adopted or deleted. Resources whose owner object is gone are not swept and must be removed by hand. Cleanup removes DNS independently, deletes the tunnel only after connector removal succeeds, and deletes Access only after tunnel deletion succeeds. The connector Secret cannot be regenerated because Cloudflare returns tunnel credentials only once: if it is deleted, delete and recreate the object. Access applications are created per object, so very large numbers of tunnels count against your Cloudflare plan's limits. |
 | Deprecated | `spec.targetPodSelector` is ignored; use `spec.service` |
 
 ## Project Structure
@@ -135,6 +141,8 @@ Early `v1alpha1`.
 | Flag / env | Purpose |
 |---|---|
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | Required. The operator exits at startup if either is missing. The token needs Tunnel, DNS and Access edit permissions. |
+| `CLOUDFLARE_ZONE_ID` | Required. Pins this operator instance to one Cloudflare zone; each object's `spec.cloudflare.zoneID` must match. |
+| `EDGE_PUBLIC_NAMESPACES` | Optional comma-separated namespace allowlist for `security.allowPublic: true`. Empty or unset denies public tunnels in every namespace. |
 | `--base-domain` / `EDGE_BASE_DOMAIN` | Required. Hostnames are `<subdomain>.<base-domain>`. |
 | `--connector-image` / `CONNECTOR_IMAGE` | Required. The cloudflared image; pin a version or digest. |
 | `--leader-elect` | Enable when running more than one replica. |
@@ -192,10 +200,11 @@ removes the manager and the CRD, so nothing is left running in Cloudflare.
 ## Configuring GitHub Actions CI Secrets
 
 The live Cloudflare test runs only after a merge to `main` (or when started by hand on `main`), never on pull
-requests, so pull-request code cannot read the credentials. To enable it:
+requests, so pull-request code cannot read the credentials. The live job now fails explicitly if any of its
+four required environment secrets is missing, rather than silently running only a partial tunnel test. To enable it:
 1. Navigate to **Settings -> Environments**, create an environment named `cloudflare-live`, and restrict its
    deployment branches to `main`.
-2. Add `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID` and (optionally)
+2. Add `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID` and
    `CLOUDFLARE_TEST_HOSTNAME` as **environment** secrets, and remove any repository-level copies.
 
 ### Live end-to-end test on kind (optional)
