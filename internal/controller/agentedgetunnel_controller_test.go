@@ -779,8 +779,9 @@ func TestOrphanTunnelWithUncontrolledMatchingSecretIsLeftUntouched(t *testing.T)
 
 	_, err = h.reconcile()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ownership cannot be established")
+	assert.Contains(t, err.Error(), "not managed by this AgentEdgeTunnel")
 	assert.Contains(t, h.cf.Tunnels, oldID, "the candidate tunnel must remain untouched")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "do not create a duplicate while the connector Secret is unmanaged")
 	assert.Empty(t, h.get().Status.TunnelID)
 }
 
