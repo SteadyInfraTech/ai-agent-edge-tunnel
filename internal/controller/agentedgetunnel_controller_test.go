@@ -234,6 +234,7 @@ func TestPublicTunnelSkipsAccess(t *testing.T) {
 	h := newHarness(t, func(cr *agentopsv1alpha1.AgentEdgeTunnel) {
 		cr.Spec.Security = agentopsv1alpha1.SecurityConfig{AllowPublic: true}
 	})
+	h.r.PublicNamespaces = map[string]struct{}{"default": {}}
 
 	_, err := h.reconcile()
 	require.NoError(t, err)
