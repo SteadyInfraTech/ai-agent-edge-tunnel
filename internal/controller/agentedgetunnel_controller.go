@@ -467,13 +467,19 @@ func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *age
 	if !metav1.IsControlledBy(&s, t) {
 		return false, nil
 	}
-	var creds struct{ TunnelID string }
+	var creds struct {
+		AccountTag   string
+		TunnelSecret string
+		TunnelID     string
+	}
 	if err := json.Unmarshal(s.Data[credentialsKey], &creds); err != nil {
 		// Malformed credentials provide no ownership evidence; this is not a reconcile error.
 		//nolint:nilerr // Deliberately treat malformed credentials as an ownership mismatch.
 		return false, nil
 	}
-	return creds.TunnelID == tunnelID, nil
+	return creds.AccountTag == r.AccountID &&
+		creds.TunnelSecret != "" &&
+		creds.TunnelID == tunnelID, nil
 }
 
 // discardTunnel removes a tunnel whose ID could not be recorded.
