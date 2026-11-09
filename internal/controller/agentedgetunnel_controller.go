@@ -29,7 +29,7 @@ import (
 	cf "github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
 )
 
-var errAccessPolicyDrift = errors.New("Cloudflare Access policy drift detected")
+var errAccessPolicyDrift = errors.New("cloudflare access policy drift detected")
 
 const (
 	// FinalizerName blocks deletion of an AgentEdgeTunnel until its Cloudflare
