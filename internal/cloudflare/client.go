@@ -49,8 +49,8 @@ type AccessAppRef struct {
 type TunnelService interface {
 	CreateTunnel(ctx context.Context, name string) (*TunnelInfo, error)
 	// FindTunnels returns the tunnels that exist (not deleted) with exactly this
-	// name. Tunnel names are account-wide, so the operator's names identify
-	// the object that created them.
+	// name. The name is only a lookup key; the controller must establish ownership
+	// independently before adopting or deleting a match.
 	FindTunnels(ctx context.Context, name string) ([]TunnelRef, error)
 	// FindAccessApplications returns the Access applications of accountID whose
 	// name and domain both equal the given values.
