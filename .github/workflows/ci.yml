@@ -54,9 +54,7 @@ jobs:
         run: |
           kubectl kustomize config/default > /tmp/default.yaml
           grep -q '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml
-          test "$(grep -c '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml)" -eq 2
-          test "$(grep -c '^kind: ValidatingAdmissionPolicyBinding$' /tmp/default.yaml)" -eq 2
-          grep -q '^  name: edge-tunnel-quota-admin-policy$' /tmp/default.yaml
+          test "$(grep -c '^kind: ValidatingAdmissionPolicy
 
       - name: Namespaced overlay grants nothing cluster-wide
         run: |
@@ -174,8 +172,8 @@ jobs:
         run: |
           kubectl get agentsessions,agentedgetunnels -A || true
           kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
- /tmp/default.yaml
-          grep -q '^  name: edge-tunnel-quota-admin-policy
+ /tmp/default.yaml)" -eq 2
+          test "$(grep -c '^kind: ValidatingAdmissionPolicyBinding
 
       - name: Namespaced overlay grants nothing cluster-wide
         run: |
@@ -293,7 +291,7 @@ jobs:
         run: |
           kubectl get agentsessions,agentedgetunnels -A || true
           kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
- /tmp/default.yaml
+ /tmp/default.yaml)" -eq 2
           grep -q '^  name: edge-tunnel-quota-admin-policy
 
       - name: Namespaced overlay grants nothing cluster-wide
