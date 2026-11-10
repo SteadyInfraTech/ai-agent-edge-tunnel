@@ -113,7 +113,14 @@ func (r *AgentEdgeTunnelReconciler) reconcileSession(ctx context.Context, t *age
 		return r.waitForSession(ctx, t, fmt.Sprintf("waiting for AgentSession %q to exist", t.Spec.SessionRef.Name))
 	case meta.IsNoMatchError(err):
 		// The AgentSession CRD is not installed. That says nothing about a
-		// session that was bound, so never end a tunnel because of it.
+		// session that was bound, so never end a tunnel because of it. However,
+		// the missing optional API must not suspend independent TTL, Service,
+		// Access-policy, or connector safeguards for an already-active tunnel.
+		if pinned && t.Status.Phase == agentopsv1alpha1.PhaseActive {
+			log.FromContext(ctx).Error(err, "AgentSession CRD is unavailable; continuing active tunnel safeguards", "session", t.Spec.SessionRef.Name)
+			res, activeErr := r.reconcileActive(ctx, t)
+			return res, true, activeErr
+		}
 		return ctrl.Result{}, true, fmt.Errorf("the AgentSession kind %s is not installed: %w", agentSessionGVK.GroupKind(), err)
 	case err != nil:
 		return ctrl.Result{}, true, err

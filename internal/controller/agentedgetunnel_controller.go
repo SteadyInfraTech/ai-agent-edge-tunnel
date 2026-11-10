@@ -234,6 +234,23 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 		return ctrl.Result{}, nil
 	}
 	log.FromContext(ctx).Info("Cleaning up Cloudflare resources for deleted AgentEdgeTunnel", "name", t.Name)
+	// A tunnel can exist with its ID missing from status when the status write
+	// timed out after Cloudflare creation. Before dropping the finalizer, use
+	// the controlled connector Secret as independent ownership evidence and
+	// recover that tunnel so deletion can clean it up.
+	if t.Status.TunnelID == "" && hasConnector(t) {
+		recovered, err := r.recoverTunnel(ctx, t)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("recovering tunnel during deletion: %w", err)
+		}
+		if recovered != nil {
+			t.Status.TunnelID = recovered.ID
+			t.Status.Hostname = r.hostname(t)
+			if err := r.Status().Update(ctx, t); err != nil {
+				return ctrl.Result{}, fmt.Errorf("recording recovered tunnel before deletion: %w", err)
+			}
+		}
+	}
 	// On failure the finalizer stays, so the object remains visible and the
 	// cleanup is retried with backoff instead of silently leaking.
 	if err := r.cleanup(ctx, t); err != nil {

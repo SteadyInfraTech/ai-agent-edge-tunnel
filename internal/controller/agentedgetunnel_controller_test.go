@@ -712,6 +712,41 @@ func orphanTunnel(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel)) 
 	return h
 }
 
+// TestDeletingAnOrphanTunnelRecoversAndCleansItUp covers deletion after
+// Cloudflare created a tunnel and the status write that records its ID was lost.
+func TestDeletingAnOrphanTunnelRecoversAndCleansItUp(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	require.Len(t, h.cf.Tunnels, 1)
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Empty(t, h.cf.Tunnels, "the recovered tunnel must be deleted")
+	assert.Empty(t, h.cf.DNSRecords)
+	assert.Empty(t, h.cf.AccessApps)
+	h.assertConnectorGone()
+}
+
+// TestDeletingAnOrphanTunnelWithoutOwnershipEvidenceKeepsTheFinalizer ensures
+// deletion never removes a same-name tunnel when its controlled Secret cannot
+// prove that the tunnel belongs to this object.
+func TestDeletingAnOrphanTunnelWithoutOwnershipEvidenceKeepsTheFinalizer(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	sec, err := h.secret()
+	require.NoError(t, err)
+	sec.Data[credentialsKey] = []byte(`{"AccountTag":"another-account","TunnelSecret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","TunnelID":"not-the-orphan"}`)
+	require.NoError(t, h.k8s.Update(context.Background(), sec))
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership cannot be established")
+	assert.Len(t, h.cf.Tunnels, 1, "an unproven tunnel must remain untouched")
+	assert.Contains(t, h.get().Finalizers, FinalizerName)
+}
+
 // TestOrphanTunnelWithoutAServiceRequiresOwnershipEvidence checks that a
 // same-name tunnel cannot be adopted without independent ownership evidence.
 func TestOrphanTunnelWithoutAServiceRequiresOwnershipEvidence(t *testing.T) {
