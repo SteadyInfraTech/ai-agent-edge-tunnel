@@ -846,7 +846,7 @@ func TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe(t *testing.T) {
 	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
 	startedAt := h.get().Status.ServiceTargetVerificationSince
 	require.NotNil(t, startedAt)
-	require.Equal(t, h.now, startedAt.Time)
+	require.True(t, startedAt.Time.Equal(h.now), "verification start should use the reconciler clock")
 	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
 
 	// The status update above would enqueue another reconcile through the
