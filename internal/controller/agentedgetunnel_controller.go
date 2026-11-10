@@ -234,6 +234,29 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 		return ctrl.Result{}, nil
 	}
 	log.FromContext(ctx).Info("Cleaning up Cloudflare resources for deleted AgentEdgeTunnel", "name", t.Name)
+	// A tunnel can exist with its ID missing from status when the status write
+	// timed out after Cloudflare creation. Before dropping the finalizer, use
+	// the controlled connector Secret as independent ownership evidence and
+	// recover that tunnel so deletion can clean it up.
+	if t.Status.TunnelID == "" && hasConnector(t) {
+		recovered, err := r.recoverTunnel(ctx, t)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("recovering tunnel during deletion: %w", err)
+		}
+		if recovered != nil {
+			t.Status.TunnelID = recovered.ID
+			t.Status.Hostname = r.hostname(t)
+			if err := r.Status().Update(ctx, t); err != nil {
+				return ctrl.Result{}, fmt.Errorf("recording recovered tunnel before deletion: %w", err)
+			}
+		} else {
+			// No eligible tunnel was found (or only a dry-run tunnel was found
+			// in real mode), so cleanup proceeds using recorded IDs only. A
+			// matching tunnel with uncertain ownership returns an error above
+			// and keeps the finalizer in place.
+			log.FromContext(ctx).Info("No eligible Cloudflare tunnel found during deletion recovery; continuing with recorded IDs only", "tunnelName", tunnelName(t))
+		}
+	}
 	// On failure the finalizer stays, so the object remains visible and the
 	// cleanup is retried with backoff instead of silently leaking.
 	if err := r.cleanup(ctx, t); err != nil {
@@ -530,6 +553,13 @@ func (r *AgentEdgeTunnelReconciler) recoverTunnel(ctx context.Context, t *agento
 		return nil, fmt.Errorf("found %d Cloudflare tunnels named %q; ownership is ambiguous and requires operator resolution", len(found), tunnelName(t))
 	}
 	ref := found[0]
+	if cf.IsDryRunID(ref.ID) && !r.DryRun {
+		// Real mode must never adopt or delete a tunnel created by the fake.
+		return nil, nil
+	}
+	if !cf.IsDryRunID(ref.ID) && r.DryRun {
+		return nil, errors.New("refusing to recover a real Cloudflare tunnel in dry-run mode")
+	}
 	ok, err := r.credentialsMatch(ctx, t, ref.ID)
 	if err != nil {
 		return nil, fmt.Errorf("verifying ownership of Cloudflare tunnel %s: %w", ref.ID, err)

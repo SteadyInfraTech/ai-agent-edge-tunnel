@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,6 +44,17 @@ func setSession(t *testing.T, h *harness, mutate func(*unstructured.Unstructured
 	require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "session-1"}, u))
 	mutate(u)
 	require.NoError(t, h.k8s.Update(context.Background(), u))
+}
+
+type missingAgentSessionKindClient struct {
+	client.Client
+}
+
+func (c *missingAgentSessionKindClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if session, ok := obj.(*unstructured.Unstructured); ok && session.GroupVersionKind() == agentSessionGVK {
+		return &meta.NoKindMatchError{GroupKind: agentSessionGVK.GroupKind(), SearchedVersions: []string{agentSessionGVK.Version}}
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
 }
 
 // TestSessionRefWaitsForBound checks: nothing is created in Cloudflare until
@@ -241,6 +254,61 @@ func TestSessionRefEnforcesTTLWhileSessionPhaseIsUnexpected(t *testing.T) {
 	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
 	assert.Contains(t, h.get().Status.Message, "TTL")
 	assert.Empty(t, h.cf.Tunnels)
+}
+
+// TestActiveSessionTunnelEnforcesTTLWhenSessionCRDIsUnavailable ensures
+// the optional AgentSession API cannot suspend the tunnel's hard TTL.
+func TestActiveSessionTunnelEnforcesTTLWhenSessionCRDIsUnavailable(t *testing.T) {
+	h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+
+	h.r.Client = &missingAgentSessionKindClient{Client: h.k8s}
+	h.now = h.now.Add(2 * time.Hour)
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "TTL")
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.DNSRecords)
+	h.assertConnectorGone()
+}
+
+// TestActiveSessionTunnelStillVerifiesAccessWhenSessionCRDIsUnavailable
+// ensures a missing optional API does not bypass Access-policy drift checks.
+func TestActiveSessionTunnelStillVerifiesAccessWhenSessionCRDIsUnavailable(t *testing.T) {
+	t.Run("confirmed drift terminates", func(t *testing.T) {
+		h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
+		_, err := h.reconcile()
+		require.NoError(t, err)
+		active := h.get()
+		app := h.cf.AccessApps[active.Status.AccessAppID]
+		app.Emails = []string{"attacker@example.com"}
+		h.cf.AccessApps[active.Status.AccessAppID] = app
+
+		h.r.Client = &missingAgentSessionKindClient{Client: h.k8s}
+		_, err = h.reconcile()
+		require.NoError(t, err)
+		assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+		assert.Empty(t, h.cf.Tunnels)
+		assert.Empty(t, h.cf.DNSRecords)
+	})
+	t.Run("transient verification error preserves resources", func(t *testing.T) {
+		h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
+		_, err := h.reconcile()
+		require.NoError(t, err)
+		active := h.get()
+		h.cf.FindAccessErr = errors.New("Cloudflare API temporarily unavailable")
+		h.r.Client = &missingAgentSessionKindClient{Client: h.k8s}
+
+		_, err = h.reconcile()
+		require.Error(t, err)
+		assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+		assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+		assert.Contains(t, h.cf.AccessApps, active.Status.AccessAppID)
+		assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
+	})
 }
 
 // TestActiveSessionTunnelRequeuesAtThePollInterval checks: the first requeue
