@@ -224,8 +224,6 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(bindingYAML, &binding))
 	require.NoError(t, k8s.Create(ctx, &binding))
 
-	// Wait until the API server has compiled and accepted the policy before
-	// asserting admission decisions; otherwise the first create can race policy activation.
 	// The API server may need a short interval to observe the policy and binding.
 	// Probe enforcement itself instead of depending on status controllers that
 	// envtest does not necessarily run.
@@ -251,16 +249,6 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	require.True(t, policyEnforced, "the API server should enforce the tenant admission policy")
-
-	newTunnel := func(namespace, name, zoneID string, allowPublic bool) *agentopsv1alpha1.AgentEdgeTunnel {
-		return &agentopsv1alpha1.AgentEdgeTunnel{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-			Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{
-				Cloudflare: agentopsv1alpha1.CloudflareConfig{ZoneID: zoneID, Subdomain: name},
-				Security:   agentopsv1alpha1.SecurityConfig{AllowPublic: allowPublic},
-			},
-		}
-	}
 
 	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "valid-protected", "zone-123", false)))
 	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "wrong-zone", "other-zone", false)),
