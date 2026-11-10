@@ -814,6 +814,9 @@ func TestRejectsUnsafeEndpointSlicesBeforeProvisioning(t *testing.T) {
 		"missing Pod reference": func(_ *corev1.Service, _ *corev1.Pod, slice *discoveryv1.EndpointSlice) {
 			slice.Endpoints[0].TargetRef = nil
 		},
+		"missing target Pod": func(_ *corev1.Service, _ *corev1.Pod, slice *discoveryv1.EndpointSlice) {
+			slice.Endpoints[0].TargetRef.Name = "missing-pod"
+		},
 		"foreign namespace reference": func(_ *corev1.Service, _ *corev1.Pod, slice *discoveryv1.EndpointSlice) {
 			slice.Endpoints[0].TargetRef.Namespace = "kube-system"
 		},
@@ -852,11 +855,10 @@ func TestRejectsUnsafeEndpointSlicesBeforeProvisioning(t *testing.T) {
 // Service or EndpointSlice change cannot silently redirect an active tunnel.
 func TestActiveTunnelTerminatesWhenServiceTargetBecomesUnsafe(t *testing.T) {
 	for name, mutate := range map[string]func(*harness){
-		"Service becomes ExternalName": func(h *harness) {
+		"Service loses its selector": func(h *harness) {
 			var service corev1.Service
 			require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker"}, &service))
-			service.Spec.Type = corev1.ServiceTypeExternalName
-			service.Spec.ExternalName = "outside.example.com"
+			service.Spec.Selector = nil
 			require.NoError(h.t, h.k8s.Update(context.Background(), &service))
 		},
 		"EndpointSlice gains a non-Pod endpoint": func(h *harness) {
