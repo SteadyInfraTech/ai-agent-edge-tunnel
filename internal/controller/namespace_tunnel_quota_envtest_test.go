@@ -447,9 +447,9 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
 			"CLOUDFLARE_ZONE_ID":     "different-zone",
-			"CLOUDFLARE_ZONE_NAME":    "example.com",
-			"EDGE_BASE_DOMAIN":        "agents.example.com",
-			"EDGE_PUBLIC_NAMESPACES":  "allowed-public, another-public",
+			"CLOUDFLARE_ZONE_NAME":   "example.com",
+			"EDGE_BASE_DOMAIN":       "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, restoredParams))
