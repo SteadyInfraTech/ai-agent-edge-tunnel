@@ -16,9 +16,9 @@ spec:
       scope: Namespaced
   validations:
   - expression: >-
-      params != null &&
       request.userInfo.groups.exists(group,
         group == 'system:masters' ||
-        ('EDGE_QUOTA_ADMIN_GROUPS' in params.data &&
+        (params != null &&
+         'EDGE_QUOTA_ADMIN_GROUPS' in params.data &&
          params.data['EDGE_QUOTA_ADMIN_GROUPS'].split(',').exists(allowed, allowed.trim() == group)))
     message: NamespaceTunnelQuota changes are restricted to system:masters or groups listed in EDGE_QUOTA_ADMIN_GROUPS
