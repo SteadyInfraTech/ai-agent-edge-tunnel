@@ -1,0 +1,40 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: edge-tunnel-tenant-policy
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [edge.steadyinfra.com]
+      apiVersions: [v1alpha1]
+      operations: [CREATE, UPDATE]
+      resources: [agentedgetunnels]
+      scope: Namespaced
+  validations:
+  - expression: >-
+      params != null &&
+      params.data['CLOUDFLARE_ZONE_ID'] != '' &&
+      object.spec.cloudflare.zoneID == params.data['CLOUDFLARE_ZONE_ID'] &&
+      params.data['EDGE_BASE_DOMAIN'] != '' &&
+      params.data['CLOUDFLARE_ZONE_NAME'] != '' &&
+      ((params.data['EDGE_BASE_DOMAIN'].startsWith('.') ?
+        params.data['EDGE_BASE_DOMAIN'].substring(1) : params.data['EDGE_BASE_DOMAIN']) ==
+       (params.data['CLOUDFLARE_ZONE_NAME'].startsWith('.') ?
+        params.data['CLOUDFLARE_ZONE_NAME'].substring(1) : params.data['CLOUDFLARE_ZONE_NAME']) ||
+       (params.data['EDGE_BASE_DOMAIN'].startsWith('.') ?
+        params.data['EDGE_BASE_DOMAIN'].substring(1) : params.data['EDGE_BASE_DOMAIN']).endsWith('.' +
+        (params.data['CLOUDFLARE_ZONE_NAME'].startsWith('.') ?
+         params.data['CLOUDFLARE_ZONE_NAME'].substring(1) : params.data['CLOUDFLARE_ZONE_NAME'])))
+    message: spec.cloudflare.zoneID must match the configured Cloudflare zone for EDGE_BASE_DOMAIN
+  - expression: >-
+      params != null && (
+      !has(object.spec.security) ||
+      !has(object.spec.security.allowPublic) ||
+      !object.spec.security.allowPublic ||
+      ('EDGE_PUBLIC_NAMESPACES' in params.data &&
+       params.data['EDGE_PUBLIC_NAMESPACES'].split(',').exists(ns, ns.trim() == request.namespace)))
+    message: security.allowPublic is permitted only in namespaces listed in EDGE_PUBLIC_NAMESPACES

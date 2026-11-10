@@ -51,7 +51,10 @@ jobs:
         run: go build -o bin/manager ./cmd
 
       - name: Render Kubernetes manifests
-        run: kubectl kustomize config/default > /dev/null
+        run: |
+          kubectl kustomize config/default > /tmp/default.yaml
+          grep -q '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml
+          grep -q '^kind: ValidatingAdmissionPolicyBinding$' /tmp/default.yaml
 
       - name: Namespaced overlay grants nothing cluster-wide
         run: |
@@ -61,6 +64,8 @@ jobs:
             exit 1
           fi
           grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+          grep -q '^kind: ValidatingAdmissionPolicy$' /tmp/namespaced.yaml
+          grep -q '^kind: ValidatingAdmissionPolicyBinding$' /tmp/namespaced.yaml
 
       - name: Build container image
         run: docker build -t ai-agent-edge-tunnel:ci .

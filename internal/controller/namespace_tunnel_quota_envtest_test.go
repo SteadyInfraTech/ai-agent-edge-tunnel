@@ -2,19 +2,24 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/yaml"
 
 	"github.com/stretchr/testify/require"
 )
@@ -168,4 +173,236 @@ func TestNamespaceQuotaEnvtest(t *testing.T) {
 	require.NoError(t, reconciler.ensureQuotaReservation(ctx, existing, true), "existing provisioned tunnels are grandfathered")
 	newTunnel := createTunnel("quota-lower", "new-after-lowering")
 	require.ErrorIs(t, reconciler.ensureQuotaReservation(ctx, newTunnel, false), errQuotaExhausted)
+}
+
+// TestTenantAdmissionPolicyEnvtest exercises the checked-in admission policy
+// against a real API server, including zone pinning and the exact public namespace allowlist.
+func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("envtest assets are installed only by the dedicated envtest workflow")
+	}
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join("..", "..", "config", "crd", "bases")},
+	}
+	cfg, err := testEnv.Start()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, testEnv.Stop())
+	})
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme))
+	k8s, err := client.New(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for _, name := range []string{"edge-tunnel-system", "allowed-public", "restricted"} {
+		require.NoError(t, k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}))
+	}
+	params := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
+		Data: map[string]string{
+			"CLOUDFLARE_ZONE_ID":     "zone-123",
+			"CLOUDFLARE_ZONE_NAME":   "example.com",
+			"EDGE_BASE_DOMAIN":       "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
+		},
+	}
+	require.NoError(t, k8s.Create(ctx, params))
+
+	policyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "validatingadmissionpolicy.yaml"))
+	require.NoError(t, err)
+	var policy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.Unmarshal(policyYAML, &policy))
+	require.NoError(t, k8s.Create(ctx, &policy))
+
+	bindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "validatingadmissionpolicybinding.yaml"))
+	require.NoError(t, err)
+	var binding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	require.NoError(t, yaml.Unmarshal(bindingYAML, &binding))
+	require.NoError(t, k8s.Create(ctx, &binding))
+
+	// The API server may need a short interval to observe the policy and binding.
+	// Probe enforcement itself instead of depending on status controllers that
+	// envtest does not necessarily run.
+	newTunnel := func(namespace, name, zoneID string, allowPublic bool) *agentopsv1alpha1.AgentEdgeTunnel {
+		return &agentopsv1alpha1.AgentEdgeTunnel{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{
+				Cloudflare: agentopsv1alpha1.CloudflareConfig{ZoneID: zoneID, Subdomain: name},
+				Security:   agentopsv1alpha1.SecurityConfig{AllowPublic: allowPublic},
+			},
+		}
+	}
+
+	zonePolicyMessage := "spec.cloudflare.zoneID must match the configured Cloudflare zone for EDGE_BASE_DOMAIN"
+	isZonePolicyDenial := func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), zonePolicyMessage)
+	}
+	probePolicyUntilDenied := func(zoneID, label string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			probe := newTunnel("restricted", fmt.Sprintf("%s-%d", label, time.Now().UnixNano()), zoneID, false)
+			err := k8s.Create(ctx, probe)
+			if isZonePolicyDenial(err) {
+				return
+			}
+			if err == nil {
+				require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before policy activation")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for the expected admission denial: %s", zonePolicyMessage)
+	}
+	probePolicyUntilDenied("other-zone", "wrong-zone-probe")
+
+	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "valid-protected", "zone-123", false)))
+	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "wrong-zone", "other-zone", false)),
+		"a tenant must not select a different Cloudflare zone")
+	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "public-denied", "zone-123", true)),
+		"allowPublic must be denied outside the configured namespace allowlist")
+	require.NoError(t, k8s.Create(ctx, newTunnel("allowed-public", "public-allowed", "zone-123", true)),
+		"allowPublic must be accepted in an exactly allowlisted namespace")
+
+	// Prove the API server has observed each ConfigMap update before checking
+	// normalization; otherwise a stale, previously-valid parameter could mask a bug.
+	params.Data["CLOUDFLARE_ZONE_NAME"] = ".example.com"
+	params.Data["EDGE_BASE_DOMAIN"] = "agents.other.example"
+	require.NoError(t, k8s.Update(ctx, params))
+	probePolicyUntilDenied("zone-123", "wrong-base-domain-probe")
+
+	// The operator accepts one leading dot on the zone name; admission must
+	// normalize it identically rather than rejecting otherwise-valid tenants.
+	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
+	require.NoError(t, k8s.Update(ctx, params))
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		probe := newTunnel("restricted", fmt.Sprintf("leading-dot-zone-probe-%d", time.Now().UnixNano()), "zone-123", false)
+		err := k8s.Create(ctx, probe)
+		if err == nil {
+			require.NoError(t, k8s.Delete(ctx, probe))
+			break
+		}
+		if !isZonePolicyDenial(err) {
+			t.Fatalf("unexpected error while waiting for normalized zone parameters: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "leading-dot-zone-name", "zone-123", false)))
+	params.Data["CLOUDFLARE_ZONE_NAME"] = "example.com"
+
+	// A malformed base-domain/zone-name tuple must fail closed.
+	params.Data["EDGE_BASE_DOMAIN"] = ""
+	require.NoError(t, k8s.Update(ctx, params))
+	probePolicyUntilDenied("zone-123", "empty-base-domain-probe")
+	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
+	require.NoError(t, k8s.Update(ctx, params))
+
+	// A terminating object can remove its finalizer when parameters exist,
+	// even if their values are invalid. Missing parameters remain fail-closed.
+	terminating := newTunnel("restricted", "finalizer-cleanup", "zone-123", false)
+	terminating.Finalizers = []string{FinalizerName}
+	require.NoError(t, k8s.Create(ctx, terminating))
+	require.NoError(t, k8s.Delete(ctx, terminating))
+	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
+	require.NotNil(t, terminating.DeletionTimestamp)
+	require.NoError(t, k8s.Delete(ctx, params))
+
+	// Parameter resolution is cached by the API server. Wait until the deleted
+	// ConfigMap is no longer served as policy parameters before asserting that
+	// both ordinary updates and creates are denied.
+	isMissingParameterDenial := func(err error) bool {
+		return apierrors.IsForbidden(err) || apierrors.IsInvalid(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	updateDenied := false
+	for time.Now().Before(deadline) {
+		var ordinaryUpdate agentopsv1alpha1.AgentEdgeTunnel
+		require.NoError(t, k8s.Get(ctx, client.ObjectKey{Namespace: "restricted", Name: "valid-protected"}, &ordinaryUpdate))
+		ordinaryUpdate.Annotations = map[string]string{"tenant-change": fmt.Sprintf("%d", time.Now().UnixNano())}
+		updateErr := k8s.Update(ctx, &ordinaryUpdate)
+		if isMissingParameterDenial(updateErr) {
+			updateDenied = true
+			break
+		}
+		if updateErr != nil {
+			t.Fatalf("unexpected error while waiting for missing policy parameters to take effect: %v", updateErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, updateDenied, "ordinary updates must remain fail-closed when policy parameters are missing")
+
+	createDenied := false
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		probe := newTunnel("restricted", fmt.Sprintf("missing-policy-params-%d", time.Now().UnixNano()), "zone-123", false)
+		createErr := k8s.Create(ctx, probe)
+		if isMissingParameterDenial(createErr) {
+			createDenied = true
+			break
+		}
+		if createErr != nil {
+			t.Fatalf("unexpected error while waiting for missing policy parameters to take effect: %v", createErr)
+		}
+		require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before missing parameters take effect")
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, createDenied, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
+
+	// Restore the ConfigMap with an invalid zone ID. Admission remains
+	// fail-closed for finalizer removal until the configuration is valid again.
+	restoredParams := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
+		Data: map[string]string{
+			"CLOUDFLARE_ZONE_ID":     "different-zone",
+			"CLOUDFLARE_ZONE_NAME":   "example.com",
+			"EDGE_BASE_DOMAIN":       "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
+		},
+	}
+	require.NoError(t, k8s.Create(ctx, restoredParams))
+	probePolicyUntilDenied("zone-123", "wrong-zone-after-restore")
+	var current agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &current))
+	current.Finalizers = nil
+	var finalizerRemovalDenied bool
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		removeErr := k8s.Update(ctx, &current)
+		if apierrors.IsForbidden(removeErr) || apierrors.IsInvalid(removeErr) {
+			finalizerRemovalDenied = true
+			break
+		}
+		if removeErr != nil {
+			t.Fatalf("unexpected error while checking invalid-parameter cleanup behavior: %v", removeErr)
+		}
+		t.Fatalf("finalizer removal unexpectedly succeeded with an invalid zone ID")
+	}
+	require.True(t, finalizerRemovalDenied, "finalizer removal must remain blocked while admission parameters are invalid")
+
+	// Repair the parameter ConfigMap, then the terminating resource can finish.
+	restoredParams.Data["CLOUDFLARE_ZONE_ID"] = "zone-123"
+	require.NoError(t, k8s.Update(ctx, restoredParams))
+	finalizerRemoved := false
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var latest agentopsv1alpha1.AgentEdgeTunnel
+		require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &latest))
+		latest.Finalizers = nil
+		removeErr := k8s.Update(ctx, &latest)
+		if removeErr == nil {
+			finalizerRemoved = true
+			break
+		}
+		if !apierrors.IsForbidden(removeErr) && !apierrors.IsInvalid(removeErr) {
+			t.Fatalf("unexpected error while waiting for valid parameters: %v", removeErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, finalizerRemoved, "finalizer removal should succeed after restoring valid admission parameters")
 }
