@@ -547,6 +547,13 @@ func (r *AgentEdgeTunnelReconciler) recoverTunnel(ctx context.Context, t *agento
 		return nil, fmt.Errorf("found %d Cloudflare tunnels named %q; ownership is ambiguous and requires operator resolution", len(found), tunnelName(t))
 	}
 	ref := found[0]
+	if cf.IsDryRunID(ref.ID) && !r.DryRun {
+		// Real mode must never adopt or delete a tunnel created by the fake.
+		return nil, nil
+	}
+	if !cf.IsDryRunID(ref.ID) && r.DryRun {
+		return nil, errors.New("refusing to recover a real Cloudflare tunnel in dry-run mode")
+	}
 	ok, err := r.credentialsMatch(ctx, t, ref.ID)
 	if err != nil {
 		return nil, fmt.Errorf("verifying ownership of Cloudflare tunnel %s: %w", ref.ID, err)
