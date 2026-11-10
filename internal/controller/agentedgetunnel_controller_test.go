@@ -791,10 +791,6 @@ func TestProvisioningRetriesTransientServiceEndpointMismatch(t *testing.T) {
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
-// TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe ensures an
-// EndpointSlice mismatch is tolerated for a time-bounded grace period, then
-// removes an already-exposed tunnel if the mismatch persists. Immediate
-// reconciles model status-update/watch events and must not consume that period.
 // TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch
 // ensures provisioning does not destroy an already-created tunnel during a
 // short Pod/EndpointSlice rollout race.
@@ -829,6 +825,10 @@ func TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch(t *t
 	assert.Len(t, h.cf.Tunnels, 1)
 }
 
+// TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe ensures an
+// EndpointSlice mismatch is tolerated for a time-bounded grace period, then
+// removes an already-exposed tunnel if the mismatch persists. Immediate
+// reconciles model status-update/watch events and must not consume that period.
 func TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
