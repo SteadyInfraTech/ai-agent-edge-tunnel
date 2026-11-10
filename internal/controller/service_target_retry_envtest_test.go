@@ -91,9 +91,9 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker", Namespace: namespace},
 		Spec: corev1.ServiceSpec{
-			Type:      corev1.ServiceTypeClusterIP,
-			Selector:  map[string]string{"app": "langgraph-worker"},
-			Ports:     []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{"app": "langgraph-worker"},
+			Ports:    []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, service))
