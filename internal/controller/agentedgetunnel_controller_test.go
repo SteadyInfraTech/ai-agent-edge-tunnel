@@ -62,7 +62,7 @@ func defaultServiceFixtures(target *agentopsv1alpha1.ServiceTarget, namespace st
 			},
 		},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, UID: podUID, Labels: selector},
+			ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, UID: podUID, Labels: map[string]string{"app.kubernetes.io/name": target.Name}},
 			Status: corev1.PodStatus{
 				PodIP:  "10.244.0.10",
 				PodIPs: []corev1.PodIP{{IP: "10.244.0.10"}},
