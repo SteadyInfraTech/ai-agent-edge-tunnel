@@ -37,10 +37,10 @@ type Client struct {
 
 // AccessApp is a recorded Access application.
 type AccessApp struct {
-	Name              string
-	Domain            string
-	Emails            []string
-	HasPublicOverride bool
+	Name	string
+	Domain	string
+	Emails	[]string
+	HasPublicOverride	bool
 }
 
 // New returns an empty Client.
