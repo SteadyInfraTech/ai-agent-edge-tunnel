@@ -154,6 +154,7 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 		allowedEmails []string
 		wantMatch     bool
 		appConfig     string
+		appBody       string
 		wantErr       bool
 	}{
 		{
@@ -213,6 +214,24 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			appConfig:     `,"type":"self_hosted","destinations":[{"type":"public","uri":"agent.example.com","future_bypass":true}]`,
 		},
 		{
+			name:          "multiple destinations",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"self_hosted","destinations":[{"type":"public","uri":"agent.example.com"},{"type":"public","uri":"other.example.com"}]`,
+		},
+		{
+			name:          "malformed destination",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"self_hosted","destinations":["agent.example.com"]`,
+		},
+		{
+			name:          "non self-hosted application type",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"bookmark"`,
+		},
+		{
 			name:          "exact destination without overrides",
 			policies:      validPolicy,
 			allowedEmails: []string{"dev@example.com"},
@@ -223,6 +242,18 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			name:          "temporary application API error",
 			appStatus:     http.StatusInternalServerError,
 			allowedEmails: []string{"dev@example.com"},
+			wantErr:       true,
+		},
+		{
+			name:          "access denied is an error, not drift",
+			appStatus:     http.StatusForbidden,
+			allowedEmails: []string{"dev@example.com"},
+			wantErr:       true,
+		},
+		{
+			name:          "unsuccessful API envelope is an error",
+			allowedEmails: []string{"dev@example.com"},
+			appBody:       `{"success":false,"errors":[{"code":1000,"message":"application lookup failed"}],"messages":[]}`,
 			wantErr:       true,
 		},
 		{
@@ -242,14 +273,18 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1003,"message":"not found"}],"messages":[]}`)
 						return
 					}
-					if tt.appStatus == http.StatusInternalServerError {
-						w.WriteHeader(http.StatusInternalServerError)
-						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1000,"message":"temporary failure"}],"messages":[]}`)
+					if tt.appStatus == http.StatusInternalServerError || tt.appStatus == http.StatusForbidden {
+						w.WriteHeader(tt.appStatus)
+						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1000,"message":"temporary or forbidden failure"}],"messages":[]}`)
 						return
 					}
 					if r.Header.Get("Authorization") != "Bearer test-token" {
 						w.WriteHeader(http.StatusForbidden)
 						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":10000,"message":"missing auth"}],"messages":[]}`)
+						return
+					}
+					if tt.appBody != "" {
+						_, _ = fmt.Fprint(w, tt.appBody)
 						return
 					}
 					_, _ = fmt.Fprintf(w, `{"success":true,"result":{"id":%q,"name":%q,"domain":%q%s}}`, appID, appName, domain, tt.appConfig)
