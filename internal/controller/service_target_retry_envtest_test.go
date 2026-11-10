@@ -72,7 +72,6 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 	go func() {
 		managerErr <- mgr.Start(managerCtx)
 	}()
-	require.True(t, mgr.GetCache().WaitForCacheSync(managerCtx), "manager cache should synchronize")
 	t.Cleanup(func() {
 		cancelManager()
 		select {
@@ -82,16 +81,43 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 			t.Error("manager did not stop")
 		}
 	})
+	require.True(t, mgr.GetCache().WaitForCacheSync(managerCtx), "manager cache should synchronize")
 
 	k8s := mgr.GetClient()
 	ctx := context.Background()
-	require.NoError(t, k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
-	for _, obj := range serviceTestFixtures("default", "langgraph-worker", "10.96.0.10", "10.244.0.10") {
-		require.NoError(t, k8s.Create(ctx, obj))
+	const namespace = "service-retry-test"
+	require.NoError(t, k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}))
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker", Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeClusterIP,
+			ClusterIP: "10.96.0.10",
+			Selector: map[string]string{"app": "langgraph-worker"},
+			Ports: []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+		},
 	}
+	require.NoError(t, k8s.Create(ctx, service))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker-pod", Namespace: namespace, Labels: map[string]string{"app": "langgraph-worker"}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "example.invalid/test"}}},
+	}
+	require.NoError(t, k8s.Create(ctx, pod))
+	pod.Status.PodIP = "10.244.0.10"
+	pod.Status.PodIPs = []corev1.PodIP{{IP: "10.244.0.10"}}
+	require.NoError(t, k8s.Status().Update(ctx, pod))
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker-slice", Namespace: namespace, Labels: map[string]string{discoveryv1.LabelServiceName: "langgraph-worker"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.244.0.10"},
+			TargetRef: &corev1.ObjectReference{APIVersion: "v1", Kind: "Pod", Namespace: namespace, Name: pod.Name, UID: pod.UID},
+		}},
+	}
+	require.NoError(t, k8s.Create(ctx, slice))
 
 	tunnel := &agentopsv1alpha1.AgentEdgeTunnel{
-		ObjectMeta: metav1.ObjectMeta{Name: "manager-watch-test", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "manager-watch-test", Namespace: namespace},
 		Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{
 			Service:    &agentopsv1alpha1.ServiceTarget{Name: "langgraph-worker", Port: 8080},
 			Cloudflare: agentopsv1alpha1.CloudflareConfig{ZoneID: "zone", Subdomain: "manager-watch-test"},
@@ -101,33 +127,35 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 	}
 	require.NoError(t, k8s.Create(ctx, tunnel))
 
-	getTunnel := func() agentopsv1alpha1.AgentEdgeTunnel {
-		t.Helper()
+	fetchTunnel := func() (agentopsv1alpha1.AgentEdgeTunnel, error) {
 		var got agentopsv1alpha1.AgentEdgeTunnel
-		require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(tunnel), &got))
-		return got
+		err := k8s.Get(ctx, client.ObjectKeyFromObject(tunnel), &got)
+		return got, err
 	}
 	require.Eventually(t, func() bool {
-		return getTunnel().Status.Phase == agentopsv1alpha1.PhaseActive
+		got, err := fetchTunnel()
+		return err == nil && got.Status.Phase == agentopsv1alpha1.PhaseActive
 	}, 30*time.Second, 100*time.Millisecond, "the manager should provision the tunnel")
 
-	var slice discoveryv1.EndpointSlice
-	sliceKey := client.ObjectKey{Namespace: "default", Name: "langgraph-worker-slice"}
-	require.NoError(t, k8s.Get(ctx, sliceKey, &slice))
+	sliceKey := client.ObjectKey{Namespace: namespace, Name: "langgraph-worker-slice"}
+	require.NoError(t, k8s.Get(ctx, sliceKey, slice))
 	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
 	require.NoError(t, k8s.Update(ctx, &slice))
 
 	require.Eventually(t, func() bool {
-		got := getTunnel()
-		return got.Status.Phase == agentopsv1alpha1.PhaseActive && got.Status.ServiceTargetVerificationSince != nil
+		got, err := fetchTunnel()
+		return err == nil && got.Status.Phase == agentopsv1alpha1.PhaseActive && got.Status.ServiceTargetVerificationSince != nil
 	}, 10*time.Second, 100*time.Millisecond, "the first transient mismatch should be recorded in status")
-	startedAt := getTunnel().Status.ServiceTargetVerificationSince
+	started, err := fetchTunnel()
+	require.NoError(t, err)
+	startedAt := started.Status.ServiceTargetVerificationSince
 	require.NotNil(t, startedAt)
 
 	// Allow the status update, Service/EndpointSlice watches, and at least one
 	// delayed retry to enqueue reconciliations while the mismatch is present.
 	time.Sleep(3 * time.Second)
-	got := getTunnel()
+	got, err := fetchTunnel()
+	require.NoError(t, err)
 	require.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
 	require.Equal(t, startedAt, got.Status.ServiceTargetVerificationSince)
 
@@ -136,7 +164,7 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 	slice.Endpoints[0].Addresses = []string{"10.244.0.10"}
 	require.NoError(t, k8s.Update(ctx, &slice))
 	require.Eventually(t, func() bool {
-		got := getTunnel()
-		return got.Status.Phase == agentopsv1alpha1.PhaseActive && got.Status.ServiceTargetVerificationSince == nil
+		got, err := fetchTunnel()
+		return err == nil && got.Status.Phase == agentopsv1alpha1.PhaseActive && got.Status.ServiceTargetVerificationSince == nil
 	}, 10*time.Second, 100*time.Millisecond, "convergence should clear the grace-period timestamp without terminating the tunnel")
 }
