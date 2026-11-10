@@ -770,6 +770,141 @@ func TestRejectsInvalidServiceTarget(t *testing.T) {
 	}
 }
 
+// TestRejectsUnsafeServiceTargetsBeforeProvisioning verifies that a tunnel
+// cannot be created for a non-local or non-TCP Service.
+func TestRejectsUnsafeServiceTargetsBeforeProvisioning(t *testing.T) {
+	tests := map[string]func(*corev1.Service){
+		"ExternalName": func(s *corev1.Service) {
+			s.Spec.Type = corev1.ServiceTypeExternalName
+			s.Spec.ExternalName = "outside.example.com"
+		},
+		"headless": func(s *corev1.Service) {
+			s.Spec.ClusterIP = corev1.ClusterIPNone
+		},
+		"selectorless": func(s *corev1.Service) {
+			s.Spec.Selector = nil
+		},
+		"missing port": func(s *corev1.Service) {
+			s.Spec.Ports = []corev1.ServicePort{{Port: 80, Protocol: corev1.ProtocolTCP}}
+		},
+		"UDP port": func(s *corev1.Service) {
+			s.Spec.Ports = []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolUDP}}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			service := defaultServiceFixtures(&agentopsv1alpha1.ServiceTarget{Name: "langgraph-worker", Port: 8080}, "default")[0].(*corev1.Service).DeepCopy()
+			mutate(service)
+			h := newHarness(t, nil, service)
+
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+			assert.Contains(t, h.get().Status.Message, "unsafe Service target")
+			assert.Zero(t, h.cf.CreateTunnelCalls, "no Cloudflare resource may be created for an unsafe Service")
+		})
+	}
+}
+
+// TestRejectsUnsafeEndpointSlicesBeforeProvisioning verifies that every
+// advertised endpoint must resolve to a matching, non-host-network Pod in the
+// same namespace.
+func TestRejectsUnsafeEndpointSlicesBeforeProvisioning(t *testing.T) {
+	tests := map[string]func(*corev1.Service, *corev1.Pod, *discoveryv1.EndpointSlice){
+		"missing Pod reference": func(_ *corev1.Service, _ *corev1.Pod, slice *discoveryv1.EndpointSlice) {
+			slice.Endpoints[0].TargetRef = nil
+		},
+		"foreign namespace reference": func(_ *corev1.Service, _ *corev1.Pod, slice *discoveryv1.EndpointSlice) {
+			slice.Endpoints[0].TargetRef.Namespace = "kube-system"
+		},
+		"address does not match Pod": func(_ *corev1.Service, _ *corev1.Pod, slice *discoveryv1.EndpointSlice) {
+			slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+		},
+		"host network Pod": func(_ *corev1.Service, pod *corev1.Pod, _ *discoveryv1.EndpointSlice) {
+			pod.Spec.HostNetwork = true
+		},
+		"Pod does not match selector": func(_ *corev1.Service, pod *corev1.Pod, _ *discoveryv1.EndpointSlice) {
+			pod.Labels["app.kubernetes.io/name"] = "another-service"
+		},
+		"unsupported address type": func(_ *corev1.Service, _ *corev1.Pod, slice *discoveryv1.EndpointSlice) {
+			slice.AddressType = discoveryv1.AddressTypeFQDN
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixtures := defaultServiceFixtures(&agentopsv1alpha1.ServiceTarget{Name: "langgraph-worker", Port: 8080}, "default")
+			service := fixtures[0].(*corev1.Service)
+			pod := fixtures[1].(*corev1.Pod)
+			slice := fixtures[2].(*discoveryv1.EndpointSlice)
+			mutate(service, pod, slice)
+			h := newHarness(t, nil, service, pod, slice)
+
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+			assert.Contains(t, h.get().Status.Message, "unsafe Service target")
+			assert.Zero(t, h.cf.CreateTunnelCalls, "no Cloudflare resource may be created for an unsafe endpoint")
+		})
+	}
+}
+
+// TestActiveTunnelTerminatesWhenServiceTargetBecomesUnsafe verifies that a
+// Service or EndpointSlice change cannot silently redirect an active tunnel.
+func TestActiveTunnelTerminatesWhenServiceTargetBecomesUnsafe(t *testing.T) {
+	for name, mutate := range map[string]func(*harness){
+		"Service becomes ExternalName": func(h *harness) {
+			var service corev1.Service
+			require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker"}, &service))
+			service.Spec.Type = corev1.ServiceTypeExternalName
+			service.Spec.ExternalName = "outside.example.com"
+			require.NoError(h.t, h.k8s.Update(context.Background(), &service))
+		},
+		"EndpointSlice gains a non-Pod endpoint": func(h *harness) {
+			var slice discoveryv1.EndpointSlice
+			require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker-slice"}, &slice))
+			slice.Endpoints[0].TargetRef = nil
+			require.NoError(h.t, h.k8s.Update(context.Background(), &slice))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+
+			mutate(h)
+			_, err = h.reconcile()
+			require.NoError(t, err)
+			assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+			assert.Contains(t, h.get().Status.Message, "service target became unsafe")
+			assert.Empty(t, h.cf.DNSRecords)
+			assert.Empty(t, h.cf.Tunnels)
+			assert.Empty(t, h.cf.AccessApps)
+		})
+	}
+}
+
+// TestServiceAndEndpointSliceEventsEnqueueReferencingTunnels verifies that
+// target changes trigger immediate reconciliation rather than waiting for the
+// periodic active-tunnel requeue.
+func TestServiceAndEndpointSliceEventsEnqueueReferencingTunnels(t *testing.T) {
+	h := newHarness(t, nil)
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker", Namespace: "default"}}
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name:      "langgraph-worker-slice",
+		Namespace: "default",
+		Labels:    map[string]string{discoveryv1.LabelServiceName: "langgraph-worker"},
+	}}
+
+	requests := h.r.mapServiceEvent(context.Background(), service)
+	require.Len(t, requests, 1)
+	assert.Equal(t, h.req.NamespacedName, requests[0].NamespacedName)
+
+	requests = h.r.mapEndpointSliceEvent(context.Background(), slice)
+	require.Len(t, requests, 1)
+	assert.Equal(t, h.req.NamespacedName, requests[0].NamespacedName)
+}
+
 // TestAmbiguousAccessStatusWriteKeepsTheApplication checks: a failed status
 // write after creating the Access application must not delete it.
 func TestAmbiguousAccessStatusWriteKeepsTheApplication(t *testing.T) {
