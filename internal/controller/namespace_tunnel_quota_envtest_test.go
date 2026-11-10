@@ -241,6 +241,18 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(quotaBindingYAML, &quotaBinding))
 	require.NoError(t, k8s.Create(ctx, &quotaBinding))
 
+	quotaStatusPolicyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_status_validatingadmissionpolicy.yaml"))
+	require.NoError(t, err)
+	var quotaStatusPolicy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.Unmarshal(quotaStatusPolicyYAML, &quotaStatusPolicy))
+	require.NoError(t, k8s.Create(ctx, &quotaStatusPolicy))
+
+	quotaStatusBindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_status_validatingadmissionpolicybinding.yaml"))
+	require.NoError(t, err)
+	var quotaStatusBinding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	require.NoError(t, yaml.Unmarshal(quotaStatusBindingYAML, &quotaStatusBinding))
+	require.NoError(t, k8s.Create(ctx, &quotaStatusBinding))
+
 	// Namespace quota limits are an administrative capacity decision. A
 	// tenant with broad custom-resource write access must not be able to
 	// create, raise, or remove its own quota. Configured admin groups can.
