@@ -9,4 +9,4 @@ spec:
   paramRef:
     name: edge-tunnel-config
     namespace: edge-tunnel-system
-    parameterNotFoundAction: Deny
+    parameterNotFoundAction: Allow
