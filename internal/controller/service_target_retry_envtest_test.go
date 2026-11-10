@@ -92,7 +92,6 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker", Namespace: namespace},
 		Spec: corev1.ServiceSpec{
 			Type:      corev1.ServiceTypeClusterIP,
-			ClusterIP: "10.96.0.10",
 			Selector:  map[string]string{"app": "langgraph-worker"},
 			Ports:     []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
 		},
