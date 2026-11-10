@@ -1006,9 +1006,8 @@ func (r *AgentEdgeTunnelReconciler) verifyTunnelServiceTarget(ctx context.Contex
 		}
 	}
 	if target == nil {
-		if t.Status.ServiceTargetVerificationTarget != "" || t.Status.ServiceTargetVerificationAttempts != 0 || t.Status.ServiceTargetVerificationSince != nil {
+		if t.Status.ServiceTargetVerificationTarget != "" || t.Status.ServiceTargetVerificationSince != nil {
 			t.Status.ServiceTargetVerificationTarget = ""
-			t.Status.ServiceTargetVerificationAttempts = 0
 			t.Status.ServiceTargetVerificationSince = nil
 			return r.Status().Update(ctx, t)
 		}
@@ -1018,15 +1017,13 @@ func (r *AgentEdgeTunnelReconciler) verifyTunnelServiceTarget(ctx context.Contex
 	statusChanged := false
 	if t.Status.ServiceTargetVerificationTarget != targetKey {
 		t.Status.ServiceTargetVerificationTarget = targetKey
-		t.Status.ServiceTargetVerificationAttempts = 0
 		t.Status.ServiceTargetVerificationSince = nil
 		statusChanged = true
 	}
 	if err := r.verifyServiceTarget(ctx, t.Namespace, target); err != nil {
 		return err
 	}
-	if t.Status.ServiceTargetVerificationAttempts != 0 || t.Status.ServiceTargetVerificationSince != nil {
-		t.Status.ServiceTargetVerificationAttempts = 0
+	if t.Status.ServiceTargetVerificationSince != nil {
 		t.Status.ServiceTargetVerificationSince = nil
 		statusChanged = true
 	}
@@ -1149,7 +1146,6 @@ func (r *AgentEdgeTunnelReconciler) handleServiceTargetVerificationError(ctx con
 		if t.Status.ServiceTargetVerificationSince == nil {
 			since := metav1.NewTime(now)
 			t.Status.ServiceTargetVerificationSince = &since
-			t.Status.ServiceTargetVerificationAttempts = 1
 			t.Status.Message = "waiting for Kubernetes Service endpoints to converge: " + cause.Error()
 			if t.Status.TunnelID == "" {
 				t.Status.Phase = agentopsv1alpha1.PhasePending
