@@ -14,7 +14,7 @@ import (
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -317,7 +317,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	// ConfigMap is no longer served as policy parameters before asserting that
 	// both ordinary updates and creates are denied.
 	isMissingParameterDenial := func(err error) bool {
-		return errors.IsForbidden(err) || errors.IsInvalid(err)
+		return apierrors.IsForbidden(err) || apierrors.IsInvalid(err)
 	}
 	deadline = time.Now().Add(15 * time.Second)
 	updateDenied := false
