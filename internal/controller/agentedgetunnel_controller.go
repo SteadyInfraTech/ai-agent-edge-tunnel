@@ -358,6 +358,8 @@ func (r *AgentEdgeTunnelReconciler) terminate(ctx context.Context, t *agentopsv1
 	t.Status.TunnelID = ""
 	t.Status.AccessAppID = ""
 	t.Status.ConnectorReady = false
+	t.Status.ServiceTargetVerificationSince = nil
+	t.Status.ServiceTargetVerificationTarget = ""
 	if err := r.Status().Update(ctx, t); err != nil {
 		return err
 	}
