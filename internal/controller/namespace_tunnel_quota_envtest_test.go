@@ -308,6 +308,10 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
 	require.NotNil(t, terminating.DeletionTimestamp)
 	require.NoError(t, k8s.Delete(ctx, params))
+	var ordinaryUpdate agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, k8s.Get(ctx, client.ObjectKey{Namespace: "restricted", Name: "valid-protected"}, &ordinaryUpdate))
+	ordinaryUpdate.Annotations = map[string]string{"tenant-change": "blocked"}
+	require.Error(t, k8s.Update(ctx, &ordinaryUpdate), "ordinary updates must remain fail-closed when policy parameters are missing")
 	terminating.Finalizers = nil
 	require.NoError(t, k8s.Update(ctx, terminating), "finalizer removal must bypass invalid or missing policy parameters")
 	missingParamsErr := k8s.Create(ctx, newTunnel("restricted", "missing-policy-params", "zone-123", false))
