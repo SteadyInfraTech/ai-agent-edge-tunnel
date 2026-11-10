@@ -12,13 +12,16 @@ spec:
     - apiGroups: [edge.steadyinfra.com]
       apiVersions: [v1alpha1]
       operations: [CREATE, UPDATE, DELETE]
-      resources: [namespacetunnelquotas]
+      resources: [namespacetunnelquotas, namespacetunnelquotas/status]
       scope: Namespaced
   validations:
   - expression: >-
-      request.userInfo.groups.exists(group,
-        group == 'system:masters' ||
-        (params != null &&
-         'EDGE_QUOTA_ADMIN_GROUPS' in params.data &&
-         params.data['EDGE_QUOTA_ADMIN_GROUPS'].split(',').exists(allowed, allowed.trim() == group)))
+      request.subResource == 'status'
+      ? (request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
+         request.userInfo.groups.exists(group, group == 'system:masters'))
+      : request.userInfo.groups.exists(group,
+          group == 'system:masters' ||
+          (params != null &&
+           'EDGE_QUOTA_ADMIN_GROUPS' in params.data &&
+           params.data['EDGE_QUOTA_ADMIN_GROUPS'].split(',').exists(allowed, allowed.trim() == group)))
     message: NamespaceTunnelQuota changes are restricted to system:masters or groups listed in EDGE_QUOTA_ADMIN_GROUPS
