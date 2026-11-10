@@ -394,12 +394,12 @@ func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID
 // model destination overrides, so decode this response directly to avoid
 // silently discarding fields that can bypass Access authentication.
 type accessApplicationConfig struct {
-	ID	string	`json:"id"`
-	Name	string	`json:"name"`
-	Domain	string	`json:"domain"`
-	Type	string	`json:"type"`
-	OptionsPreflightBypass	bool	`json:"options_preflight_bypass"`
-	Destinations	[]json.RawMessage	`json:"destinations"`
+	ID                     string            `json:"id"`
+	Name                   string            `json:"name"`
+	Domain                 string            `json:"domain"`
+	Type                   string            `json:"type"`
+	OptionsPreflightBypass bool              `json:"options_preflight_bypass"`
+	Destinations           []json.RawMessage `json:"destinations"`
 }
 
 func (c *RealCloudflareClient) getAccessApplicationConfig(ctx context.Context, accountID, appID string) (*accessApplicationConfig, error) {
