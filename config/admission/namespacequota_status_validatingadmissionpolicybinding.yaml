@@ -1,0 +1,8 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: edge-tunnel-quota-status-policy
+spec:
+  policyName: edge-tunnel-quota-status-policy
+  validationActions:
+  - Deny
