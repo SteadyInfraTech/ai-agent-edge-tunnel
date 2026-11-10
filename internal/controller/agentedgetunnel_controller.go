@@ -249,6 +249,11 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 			if err := r.Status().Update(ctx, t); err != nil {
 				return ctrl.Result{}, fmt.Errorf("recording recovered tunnel before deletion: %w", err)
 			}
+		} else {
+			// No eligible tunnel was found (or only a dry-run tunnel was found
+			// in real mode), so cleanup proceeds using recorded IDs only. A
+			// matching tunnel with uncertain ownership returns an error above
+			// and keeps the finalizer in place.
 		}
 	}
 	// On failure the finalizer stays, so the object remains visible and the

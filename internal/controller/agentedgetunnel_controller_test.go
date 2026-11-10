@@ -728,6 +728,49 @@ func TestDeletingAnOrphanTunnelRecoversAndCleansItUp(t *testing.T) {
 	h.assertConnectorGone()
 }
 
+// TestDeletingAnOrphanDryRunTunnelInRealModeLeavesItUntouched covers the
+// nil recovery result for a fake tunnel when the operator switches to real mode.
+func TestDeletingAnOrphanDryRunTunnelInRealModeLeavesItUntouched(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+	h.r.DryRun = false
+
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Len(t, h.cf.Tunnels, 1, "real mode must not delete a dry-run tunnel")
+	var gone agentopsv1alpha1.AgentEdgeTunnel
+	assert.True(t, apierrors.IsNotFound(h.k8s.Get(context.Background(), h.req.NamespacedName, &gone)))
+}
+
+// TestDeletingAnOrphanRealTunnelInDryRunModeKeepsTheFinalizer covers the
+// inverse mode guard: a dry-run operator must not adopt or delete a real ID.
+func TestDeletingAnOrphanRealTunnelInDryRunModeKeepsTheFinalizer(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	const realID = "real-tunnel-12345678"
+	var oldID string
+	for id, info := range h.cf.Tunnels {
+		oldID = id
+		delete(h.cf.Tunnels, id)
+		info.ID = realID
+		h.cf.Tunnels[realID] = info
+		break
+	}
+	require.NotEmpty(t, oldID)
+	sec, err := h.secret()
+	require.NoError(t, err)
+	sec.Data[credentialsKey] = []byte(strings.ReplaceAll(string(sec.Data[credentialsKey]), oldID, realID))
+	require.NoError(t, h.k8s.Update(context.Background(), sec))
+
+	cr := h.get()
+	require.NoError(t, h.k8s.Delete(context.Background(), &cr))
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to recover a real Cloudflare tunnel in dry-run mode")
+	assert.Contains(t, h.cf.Tunnels, realID, "dry-run mode must leave the real tunnel untouched")
+	assert.Contains(t, h.get().Finalizers, FinalizerName)
+}
+
 // TestDeletingAnOrphanTunnelWithoutOwnershipEvidenceKeepsTheFinalizer ensures
 // deletion never removes a same-name tunnel when its controlled Secret cannot
 // prove that the tunnel belongs to this object.
