@@ -268,18 +268,34 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Create(ctx, newTunnel("allowed-public", "public-allowed", "zone-123", true)),
 		"allowPublic must be accepted in an exactly allowlisted namespace")
 
-	// The operator accepts one leading dot on the zone name; admission must
-	// normalize it identically rather than rejecting otherwise-valid tenants.
+	// Prove the API server has observed each ConfigMap update before checking
+	// normalization; otherwise a stale, previously-valid parameter could mask a bug.
 	params.Data["CLOUDFLARE_ZONE_NAME"] = ".example.com"
-	require.NoError(t, k8s.Update(ctx, params))
-	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "leading-dot-zone-name", "zone-123", false)))
-	params.Data["CLOUDFLARE_ZONE_NAME"] = "example.com"
-
-	// A malformed base-domain/zone-name tuple must fail closed. Poll for the
-	// specific policy denial because the API server may cache the old params briefly.
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.other.example"
 	require.NoError(t, k8s.Update(ctx, params))
 	probePolicyUntilDenied("zone-123", "wrong-base-domain-probe")
+
+	// The operator accepts one leading dot on the zone name; admission must
+	// normalize it identically rather than rejecting otherwise-valid tenants.
+	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
+	require.NoError(t, k8s.Update(ctx, params))
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		probe := newTunnel("restricted", fmt.Sprintf("leading-dot-zone-probe-%d", time.Now().UnixNano()), "zone-123", false)
+		err := k8s.Create(ctx, probe)
+		if err == nil {
+			require.NoError(t, k8s.Delete(ctx, probe))
+			break
+		}
+		if !isZonePolicyDenial(err) {
+			t.Fatalf("unexpected error while waiting for normalized zone parameters: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "leading-dot-zone-name", "zone-123", false)))
+	params.Data["CLOUDFLARE_ZONE_NAME"] = "example.com"
+
+	// A malformed base-domain/zone-name tuple must fail closed.
 
 	// A terminating object must be able to drop its finalizer even if the
 	// parameter ConfigMap disappears; ordinary CREATE requests remain denied.
