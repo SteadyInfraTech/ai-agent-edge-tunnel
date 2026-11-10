@@ -39,6 +39,7 @@ spec:
       )
   validations:
   - expression: >-
+      params != null &&
       params.data['CLOUDFLARE_ZONE_ID'] != '' &&
       object.spec.cloudflare.zoneID == params.data['CLOUDFLARE_ZONE_ID'] &&
       params.data['EDGE_BASE_DOMAIN'] != '' &&
@@ -53,8 +54,9 @@ spec:
          params.data['CLOUDFLARE_ZONE_NAME'].substring(1) : params.data['CLOUDFLARE_ZONE_NAME'])))
     message: spec.cloudflare.zoneID must match the configured Cloudflare zone for EDGE_BASE_DOMAIN
   - expression: >-
+      params != null && (
       !has(object.spec.security) ||
       !has(object.spec.security.allowPublic) ||
       !object.spec.security.allowPublic ||
-      params.data['EDGE_PUBLIC_NAMESPACES'].split(',').exists(ns, ns.trim() == request.namespace)
+      params.data['EDGE_PUBLIC_NAMESPACES'].split(',').exists(ns, ns.trim() == request.namespace))
     message: security.allowPublic is permitted only in namespaces listed in EDGE_PUBLIC_NAMESPACES
