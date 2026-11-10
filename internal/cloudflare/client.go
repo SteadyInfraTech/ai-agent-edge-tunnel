@@ -327,8 +327,9 @@ type accessApplicationResponse struct {
 	Result struct {
 		ID           string          `json:"id"`
 		Name         string          `json:"name"`
-		Domain       string          `json:"domain"`
-		Destinations json.RawMessage `json:"destinations"`
+		Domain                 string          `json:"domain"`
+		Destinations           json.RawMessage `json:"destinations"`
+		OptionsPreflightBypass bool            `json:"options_preflight_bypass"`
 	} `json:"result"`
 }
 
@@ -367,6 +368,9 @@ func (c *RealCloudflareClient) verifyAccessApplication(ctx context.Context, acco
 		return false, fmt.Errorf("getting Access application %s: Cloudflare reported an unsuccessful response", appID)
 	}
 	if application.Result.ID != appID || application.Result.Name != name || application.Result.Domain != domain {
+		return false, nil
+	}
+	if application.Result.OptionsPreflightBypass {
 		return false, nil
 	}
 
