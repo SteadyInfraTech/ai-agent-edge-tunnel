@@ -366,6 +366,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, restoredParams))
+	probePolicyUntilDenied("zone-123", "wrong-zone-after-restore")
 	var current agentopsv1alpha1.AgentEdgeTunnel
 	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &current))
 	current.Finalizers = nil
