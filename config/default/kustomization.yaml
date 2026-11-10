@@ -1,8 +1,9 @@
 # kubectl apply -k config/default
 #
 # Before applying, create the Cloudflare credentials Secret and set
-# the edge-tunnel-config ConfigMap holding EDGE_BASE_DOMAIN and CONNECTOR_IMAGE
-# (see config/manager/manager.yaml); the operator will not start without them.
+# the edge-tunnel-config ConfigMap with EDGE_BASE_DOMAIN, CLOUDFLARE_ZONE_ID,
+# CLOUDFLARE_ZONE_NAME, CONNECTOR_IMAGE, and (optionally) EDGE_PUBLIC_NAMESPACES.
+# The admission policy reads this ConfigMap and fails closed if it is missing.
 namespace: edge-tunnel-system
 resources:
 - namespace.yaml
