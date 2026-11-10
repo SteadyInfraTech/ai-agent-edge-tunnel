@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -224,7 +225,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 
 	// Wait until the API server has compiled and accepted the policy before
 	// asserting admission decisions; otherwise the first create can race policy activation.
-	require.Eventually(t, func() bool {
+	accepted := assert.Eventually(t, func() bool {
 		var current admissionregistrationv1.ValidatingAdmissionPolicy
 		if err := k8s.Get(ctx, client.ObjectKey{Name: policy.Name}, &current); err != nil {
 			return false
@@ -236,6 +237,11 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		}
 		return false
 	}, 15*time.Second, 100*time.Millisecond, "the API server should accept the tenant admission policy")
+	if !accepted {
+		var current admissionregistrationv1.ValidatingAdmissionPolicy
+		require.NoError(t, k8s.Get(ctx, client.ObjectKey{Name: policy.Name}, &current))
+		t.Fatalf("tenant admission policy was not accepted; conditions: %#v", current.Status.Conditions)
+	}
 
 	newTunnel := func(namespace, name, zoneID string, allowPublic bool) *agentopsv1alpha1.AgentEdgeTunnel {
 		return &agentopsv1alpha1.AgentEdgeTunnel{
