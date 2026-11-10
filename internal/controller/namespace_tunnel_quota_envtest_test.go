@@ -330,13 +330,27 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, quotaAdminClient.Update(ctx, quota))
 	require.NoError(t, quotaAdminClient.Delete(ctx, quota))
 
-	// A missing parameter ConfigMap must not lock out cluster administrators,
-	// but configured namespace-quota admin groups must fail closed.
+	// Missing policy parameters deny quota spec operations for every identity,
+	// including cluster administrators. Restore the ConfigMap before changing
+	// quotas; the separate status policy remains available for recovery.
 	require.NoError(t, k8s.Delete(ctx, params))
-	breakGlassQuota := quotaObject()
-	require.NoError(t, k8s.Create(ctx, breakGlassQuota), "system:masters must retain quota recovery access without policy parameters")
-	require.NoError(t, k8s.Delete(ctx, breakGlassQuota), "system:masters must retain quota deletion access without policy parameters")
-	require.Error(t, tenantClient.Create(ctx, quotaObject()), "non-admin groups must remain denied when policy parameters are missing")
+	missingParamsDenied := false
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		probe := quotaObject()
+		createErr := k8s.Create(ctx, probe)
+		if apierrors.IsForbidden(createErr) || apierrors.IsInvalid(createErr) {
+			missingParamsDenied = true
+			break
+		}
+		if createErr != nil {
+			t.Fatalf("unexpected error while waiting for missing quota policy parameters: %v", createErr)
+		}
+		require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before missing parameters take effect")
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, missingParamsDenied, "quota spec changes must fail closed for all users when policy parameters are missing")
+	require.Error(t, tenantClient.Create(ctx, quotaObject()), "tenant groups must remain denied when policy parameters are missing")
 	params = &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
