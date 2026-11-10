@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,7 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -195,7 +195,8 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme))
 	k8s, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	for _, name := range []string{"edge-tunnel-system", "allowed-public", "restricted"} {
 		require.NoError(t, k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}))
@@ -225,23 +226,31 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 
 	// Wait until the API server has compiled and accepted the policy before
 	// asserting admission decisions; otherwise the first create can race policy activation.
-	accepted := assert.Eventually(t, func() bool {
-		var current admissionregistrationv1.ValidatingAdmissionPolicy
-		if err := k8s.Get(ctx, client.ObjectKey{Name: policy.Name}, &current); err != nil {
-			return false
+	// The API server may need a short interval to observe the policy and binding.
+	// Probe enforcement itself instead of depending on status controllers that
+	// envtest does not necessarily run.
+	newTunnel := func(namespace, name, zoneID string, allowPublic bool) *agentopsv1alpha1.AgentEdgeTunnel {
+		return &agentopsv1alpha1.AgentEdgeTunnel{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{
+				Cloudflare: agentopsv1alpha1.CloudflareConfig{ZoneID: zoneID, Subdomain: name},
+				Security:   agentopsv1alpha1.SecurityConfig{AllowPublic: allowPublic},
+			},
 		}
-		for _, condition := range current.Status.Conditions {
-			if condition.Type == "Accepted" && condition.Status == metav1.ConditionTrue {
-				return true
-			}
-		}
-		return false
-	}, 15*time.Second, 100*time.Millisecond, "the API server should accept the tenant admission policy")
-	if !accepted {
-		var current admissionregistrationv1.ValidatingAdmissionPolicy
-		require.NoError(t, k8s.Get(ctx, client.ObjectKey{Name: policy.Name}, &current))
-		t.Fatalf("tenant admission policy was not accepted; conditions: %#v", current.Status.Conditions)
 	}
+
+	policyEnforced := false
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		probe := newTunnel("restricted", fmt.Sprintf("wrong-zone-probe-%d", time.Now().UnixNano()), "other-zone", false)
+		if err := k8s.Create(ctx, probe); err != nil {
+			policyEnforced = true
+			break
+		}
+		require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before policy activation")
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, policyEnforced, "the API server should enforce the tenant admission policy")
 
 	newTunnel := func(namespace, name, zoneID string, allowPublic bool) *agentopsv1alpha1.AgentEdgeTunnel {
 		return &agentopsv1alpha1.AgentEdgeTunnel{
