@@ -14,14 +14,37 @@ spec:
       operations: [CREATE, UPDATE]
       resources: [agentedgetunnels]
       scope: Namespaced
+  matchConditions:
+  - name: skip-policy-for-terminating-finalizer-removal
+    expression: >-
+      request.operation != 'UPDATE' ||
+      !has(oldObject.metadata.deletionTimestamp) ||
+      oldObject.metadata.deletionTimestamp == null ||
+      object.spec != oldObject.spec ||
+      object.metadata.name != oldObject.metadata.name ||
+      object.metadata.namespace != oldObject.metadata.namespace ||
+      object.metadata.uid != oldObject.metadata.uid ||
+      object.metadata.labels != oldObject.metadata.labels ||
+      object.metadata.annotations != oldObject.metadata.annotations ||
+      object.metadata.ownerReferences != oldObject.metadata.ownerReferences ||
+      !((!has(object.metadata.finalizers) ||
+         object.metadata.finalizers.size() < oldObject.metadata.finalizers.size()) &&
+        (!has(object.metadata.finalizers) ||
+         object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(oldF, oldF == f))))
   validations:
   - expression: >-
       params.data['CLOUDFLARE_ZONE_ID'] != '' &&
       object.spec.cloudflare.zoneID == params.data['CLOUDFLARE_ZONE_ID'] &&
       params.data['EDGE_BASE_DOMAIN'] != '' &&
       params.data['CLOUDFLARE_ZONE_NAME'] != '' &&
-      (params.data['EDGE_BASE_DOMAIN'] == params.data['CLOUDFLARE_ZONE_NAME'] ||
-       params.data['EDGE_BASE_DOMAIN'].endsWith('.' + params.data['CLOUDFLARE_ZONE_NAME']))
+      ((params.data['EDGE_BASE_DOMAIN'].startsWith('.') ?
+        params.data['EDGE_BASE_DOMAIN'].substring(1) : params.data['EDGE_BASE_DOMAIN']) ==
+       (params.data['CLOUDFLARE_ZONE_NAME'].startsWith('.') ?
+        params.data['CLOUDFLARE_ZONE_NAME'].substring(1) : params.data['CLOUDFLARE_ZONE_NAME']) ||
+       (params.data['EDGE_BASE_DOMAIN'].startsWith('.') ?
+        params.data['EDGE_BASE_DOMAIN'].substring(1) : params.data['EDGE_BASE_DOMAIN']).endsWith('.' +
+        (params.data['CLOUDFLARE_ZONE_NAME'].startsWith('.') ?
+         params.data['CLOUDFLARE_ZONE_NAME'].substring(1) : params.data['CLOUDFLARE_ZONE_NAME'])))
     message: spec.cloudflare.zoneID must match the configured Cloudflare zone for EDGE_BASE_DOMAIN
   - expression: >-
       !has(object.spec.security) ||
