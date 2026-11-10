@@ -32,8 +32,8 @@ import (
 )
 
 var (
-	errAccessPolicyDrift    = errors.New("cloudflare access policy drift detected")
-	errUnsafeServiceTarget  = errors.New("service target is not safe to expose")
+	errAccessPolicyDrift      = errors.New("cloudflare access policy drift detected")
+	errUnsafeServiceTarget    = errors.New("service target is not safe to expose")
 	errTransientServiceTarget = errors.New("service target endpoints are not yet settled")
 )
 
