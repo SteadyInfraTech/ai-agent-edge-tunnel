@@ -151,15 +151,15 @@ to quota status. The default and namespaced installs apply two admission
 policies. The spec policy restricts quota `CREATE`, `UPDATE`, and `DELETE` to
 members of `system:masters` or groups listed in the optional comma-separated
 `EDGE_QUOTA_ADMIN_GROUPS` ConfigMap key. If the key is unset, only
-`system:masters` is authorized. If the ConfigMap is missing, `system:masters`
-retains break-glass access while all other groups are denied.
-The status policy restricts updates to `namespacetunnelquotas/status` to the
-operator's `edge-tunnel-controller-manager` ServiceAccount and `system:masters`.
-Configured quota-admin groups can manage `spec.limit` but cannot forge or remove
-reservations. The operator ServiceAccount and `system:masters` retain their
-required status recovery paths if the ConfigMap is missing. Changing
-`spec.limit` is an administrative capacity decision; do not grant quota write
-permissions to tenant roles even with these policies installed.
+`system:masters` is authorized. Its binding uses
+`parameterNotFoundAction: Deny`, so all quota spec changes are blocked while
+the ConfigMap is missing; restore it before managing quota objects.
+The separate status policy restricts updates to `namespacetunnelquotas/status`
+to the operator's `edge-tunnel-controller-manager` ServiceAccount and
+`system:masters`, independently of the ConfigMap. Configured quota-admin
+groups can manage `spec.limit` but cannot forge or remove reservations.
+Changing `spec.limit` is an administrative capacity decision; do not grant
+quota write permissions to tenant roles even with these policies installed.
 
 ## Project Structure
 
