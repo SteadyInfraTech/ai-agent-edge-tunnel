@@ -32,7 +32,7 @@ import (
 )
 
 var (
-	errAccessPolicyDrift  = errors.New("cloudflare access policy drift detected")
+	errAccessPolicyDrift   = errors.New("cloudflare access policy drift detected")
 	errUnsafeServiceTarget = errors.New("service target is not safe to expose")
 )
 

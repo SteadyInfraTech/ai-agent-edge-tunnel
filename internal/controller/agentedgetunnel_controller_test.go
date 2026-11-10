@@ -111,7 +111,7 @@ func serviceTestFixtures(namespace, name, clusterIP, podIP string) []client.Obje
 		},
 	}
 	slice := &discoveryv1.EndpointSlice{
-		ObjectMeta: metav1.ObjectMeta{Name: name + "-slice", Namespace: namespace, Labels: map[string]string{discoveryv1.LabelServiceName: name}},
+		ObjectMeta:  metav1.ObjectMeta{Name: name + "-slice", Namespace: namespace, Labels: map[string]string{discoveryv1.LabelServiceName: name}},
 		AddressType: discoveryv1.AddressTypeIPv4,
 		Endpoints: []discoveryv1.Endpoint{{
 			Addresses: []string{podIP},
