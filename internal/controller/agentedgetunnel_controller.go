@@ -40,6 +40,7 @@ var (
 const (
 	serviceTargetRetryLimit    int32 = 3
 	serviceTargetRetryInterval       = 2 * time.Second
+	serviceTargetFailedRequeue       = 10 * time.Second
 )
 
 const (
@@ -1154,9 +1155,14 @@ func (r *AgentEdgeTunnelReconciler) handleServiceTargetVerificationError(ctx con
 		if t.Status.TunnelID != "" {
 			return ctrl.Result{}, r.terminate(ctx, t, "service target became unsafe; tunnel removed: "+cause.Error())
 		}
-		t.Status.Phase = agentopsv1alpha1.PhaseFailed
-		t.Status.Message = cause.Error()
-		return ctrl.Result{RequeueAfter: maxRequeue}, r.Status().Update(ctx, t)
+		if t.Status.Phase != agentopsv1alpha1.PhaseFailed || t.Status.Message != cause.Error() {
+			t.Status.Phase = agentopsv1alpha1.PhaseFailed
+			t.Status.Message = cause.Error()
+			if err := r.Status().Update(ctx, t); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: serviceTargetFailedRequeue}, nil
 	}
 
 	verificationErr := fmt.Errorf("verifying Service target: %w", cause)
