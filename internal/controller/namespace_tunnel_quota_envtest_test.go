@@ -308,12 +308,45 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
 	require.NotNil(t, terminating.DeletionTimestamp)
 	require.NoError(t, k8s.Delete(ctx, params))
-	var ordinaryUpdate agentopsv1alpha1.AgentEdgeTunnel
-	require.NoError(t, k8s.Get(ctx, client.ObjectKey{Namespace: "restricted", Name: "valid-protected"}, &ordinaryUpdate))
-	ordinaryUpdate.Annotations = map[string]string{"tenant-change": "blocked"}
-	require.Error(t, k8s.Update(ctx, &ordinaryUpdate), "ordinary updates must remain fail-closed when policy parameters are missing")
+	// Parameter resolution is cached by the API server. Wait until the deleted
+	// ConfigMap is no longer served as policy parameters before asserting the
+	// fail-closed behavior; otherwise an immediate update can use stale params.
+	deadline = time.Now().Add(15 * time.Second)
+	updateDenied := false
+	for time.Now().Before(deadline) {
+		var ordinaryUpdate agentopsv1alpha1.AgentEdgeTunnel
+		require.NoError(t, k8s.Get(ctx, client.ObjectKey{Namespace: "restricted", Name: "valid-protected"}, &ordinaryUpdate))
+		ordinaryUpdate.Annotations = map[string]string{"tenant-change": fmt.Sprintf("%d", time.Now().UnixNano())}
+		updateErr := k8s.Update(ctx, &ordinaryUpdate)
+		if isZonePolicyDenial(updateErr) {
+			updateDenied = true
+			break
+		}
+		if updateErr != nil {
+			t.Fatalf("unexpected error while waiting for missing policy parameters to take effect: %v", updateErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, updateDenied, "ordinary updates must remain fail-closed when policy parameters are missing")
+
+	// Once parameter resolution has converged, verify CREATE is denied too.
+	createDenied := false
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		probe := newTunnel("restricted", fmt.Sprintf("missing-policy-params-%d", time.Now().UnixNano()), "zone-123", false)
+		createErr := k8s.Create(ctx, probe)
+		if isZonePolicyDenial(createErr) {
+			createDenied = true
+			break
+		}
+		if createErr != nil {
+			t.Fatalf("unexpected error while waiting for missing policy parameters to take effect: %v", createErr)
+		}
+		require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before missing parameters take effect")
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, createDenied, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
+
 	terminating.Finalizers = nil
 	require.NoError(t, k8s.Update(ctx, terminating), "finalizer removal must bypass invalid or missing policy parameters")
-	missingParamsErr := k8s.Create(ctx, newTunnel("restricted", "missing-policy-params", "zone-123", false))
-	require.Error(t, missingParamsErr, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
 }
