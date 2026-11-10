@@ -1,0 +1,12 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: edge-tunnel-quota-admin-policy
+spec:
+  policyName: edge-tunnel-quota-admin-policy
+  validationActions:
+  - Deny
+  paramRef:
+    name: edge-tunnel-config
+    namespace: edge-tunnel-system
+    parameterNotFoundAction: Deny
