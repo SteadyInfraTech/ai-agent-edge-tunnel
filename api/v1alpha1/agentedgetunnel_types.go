@@ -112,9 +112,9 @@ type AgentEdgeTunnelStatus struct {
 	SessionEndpoint string       `json:"sessionEndpoint,omitempty"`
 	ExpiresAt       *metav1.Time `json:"expiresAt,omitempty"`
 	// ServiceTargetVerificationAttempts bounds retries for transient Pod/EndpointSlice rollout races.
-	ServiceTargetVerificationAttempts int32  `json:"serviceTargetVerificationAttempts,omitempty"`
+	ServiceTargetVerificationAttempts int32 `json:"serviceTargetVerificationAttempts,omitempty"`
 	// ServiceTargetVerificationTarget identifies the Service target associated with the retry count.
-	ServiceTargetVerificationTarget    string `json:"serviceTargetVerificationTarget,omitempty"`
+	ServiceTargetVerificationTarget string `json:"serviceTargetVerificationTarget,omitempty"`
 }
 
 // +kubebuilder:object:root=true
