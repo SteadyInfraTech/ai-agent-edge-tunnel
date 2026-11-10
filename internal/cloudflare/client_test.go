@@ -269,7 +269,11 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 						application += `,"options_preflight_bypass":true`
 					}
 					application += "}"
-					_, _ = fmt.Fprintf(w, `{"success":%t,"errors":[{"code":1003,"message":"test error"}],"result":%s}`, !tt.appFailure, application)
+					errorsJSON := "[]"
+					if tt.appFailure {
+						errorsJSON = `[{"code":1003,"message":"test error"}]`
+					}
+					_, _ = fmt.Fprintf(w, `{"success":%t,"errors":%s,"result":%s}`, !tt.appFailure, errorsJSON, application)
 				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID+"/policies"):
 					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s,"result_info":{"page":1,"per_page":100,"count":1,"total_count":1,"total_pages":1}}`, tt.policies)
 				default:
