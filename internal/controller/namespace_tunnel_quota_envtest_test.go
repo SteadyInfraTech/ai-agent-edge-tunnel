@@ -14,6 +14,7 @@ import (
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -296,11 +297,14 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	params.Data["CLOUDFLARE_ZONE_NAME"] = "example.com"
 
 	// A malformed base-domain/zone-name tuple must fail closed.
-
-	// A terminating object must be able to drop its finalizer even if the
-	// parameter ConfigMap disappears; ordinary CREATE requests remain denied.
+	params.Data["EDGE_BASE_DOMAIN"] = ""
+	require.NoError(t, k8s.Update(ctx, params))
+	probePolicyUntilDenied("zone-123", "empty-base-domain-probe")
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
 	require.NoError(t, k8s.Update(ctx, params))
+
+	// A terminating object can remove its finalizer when parameters exist,
+	// even if their values are invalid. Missing parameters remain fail-closed.
 	terminating := newTunnel("restricted", "finalizer-cleanup", "zone-123", false)
 	terminating.Finalizers = []string{FinalizerName}
 	require.NoError(t, k8s.Create(ctx, terminating))
@@ -308,9 +312,13 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
 	require.NotNil(t, terminating.DeletionTimestamp)
 	require.NoError(t, k8s.Delete(ctx, params))
+
 	// Parameter resolution is cached by the API server. Wait until the deleted
-	// ConfigMap is no longer served as policy parameters before asserting the
-	// fail-closed behavior; otherwise an immediate update can use stale params.
+	// ConfigMap is no longer served as policy parameters before asserting that
+	// both ordinary updates and creates are denied.
+	isMissingParameterDenial := func(err error) bool {
+		return errors.IsForbidden(err) || errors.IsInvalid(err)
+	}
 	deadline = time.Now().Add(15 * time.Second)
 	updateDenied := false
 	for time.Now().Before(deadline) {
@@ -318,7 +326,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		require.NoError(t, k8s.Get(ctx, client.ObjectKey{Namespace: "restricted", Name: "valid-protected"}, &ordinaryUpdate))
 		ordinaryUpdate.Annotations = map[string]string{"tenant-change": fmt.Sprintf("%d", time.Now().UnixNano())}
 		updateErr := k8s.Update(ctx, &ordinaryUpdate)
-		if isZonePolicyDenial(updateErr) {
+		if isMissingParameterDenial(updateErr) {
 			updateDenied = true
 			break
 		}
@@ -329,13 +337,12 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.True(t, updateDenied, "ordinary updates must remain fail-closed when policy parameters are missing")
 
-	// Once parameter resolution has converged, verify CREATE is denied too.
 	createDenied := false
 	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		probe := newTunnel("restricted", fmt.Sprintf("missing-policy-params-%d", time.Now().UnixNano()), "zone-123", false)
 		createErr := k8s.Create(ctx, probe)
-		if isZonePolicyDenial(createErr) {
+		if isMissingParameterDenial(createErr) {
 			createDenied = true
 			break
 		}
@@ -347,6 +354,33 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.True(t, createDenied, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
 
-	terminating.Finalizers = nil
-	require.NoError(t, k8s.Update(ctx, terminating), "finalizer removal must bypass invalid or missing policy parameters")
+	// The missing-parameter denial also blocks cleanup. Restore the ConfigMap
+	// with an invalid zone ID to prove the narrowly-scoped finalizer exception.
+	restoredParams := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
+		Data: map[string]string{
+			"CLOUDFLARE_ZONE_ID":     "different-zone",
+			"CLOUDFLARE_ZONE_NAME":   "example.com",
+			"EDGE_BASE_DOMAIN":       "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
+		},
+	}
+	require.NoError(t, k8s.Create(ctx, restoredParams))
+	finalizerRemoved := false
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var current agentopsv1alpha1.AgentEdgeTunnel
+		require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &current))
+		current.Finalizers = nil
+		removeErr := k8s.Update(ctx, &current)
+		if removeErr == nil {
+			finalizerRemoved = true
+			break
+		}
+		if !isMissingParameterDenial(removeErr) {
+			t.Fatalf("unexpected error while waiting for restored parameters: %v", removeErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, finalizerRemoved, "the terminating object may remove only its operator finalizer when parameters exist but are invalid")
 }
