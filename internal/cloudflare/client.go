@@ -357,7 +357,9 @@ func (c *RealCloudflareClient) verifyAccessApplication(ctx context.Context, acco
 		return false, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("getting Access application %s: Cloudflare returned HTTP %d", appID, resp.StatusCode)
+		var failure accessApplicationResponse
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&failure)
+		return false, fmt.Errorf("getting Access application %s: Cloudflare returned HTTP %d%s", appID, resp.StatusCode, joinAPIErrors(failure))
 	}
 
 	var application accessApplicationResponse
@@ -365,7 +367,7 @@ func (c *RealCloudflareClient) verifyAccessApplication(ctx context.Context, acco
 		return false, fmt.Errorf("decoding Access application %s: %w", appID, err)
 	}
 	if !application.Success {
-		return false, fmt.Errorf("getting Access application %s: Cloudflare reported an unsuccessful response", appID)
+		return false, fmt.Errorf("getting Access application %s: Cloudflare reported an unsuccessful response%s", appID, joinAPIErrors(application))
 	}
 	if application.Result.ID != appID || application.Result.Name != name || application.Result.Domain != domain {
 		return false, nil
@@ -411,6 +413,29 @@ func (c *RealCloudflareClient) verifyAccessApplication(ctx context.Context, acco
 		return false, nil
 	}
 	return len(overrides) == 0, nil
+}
+
+// joinAPIErrors returns the API's diagnostic messages without exposing the
+// full response body or allowing an unbounded error string.
+func joinAPIErrors(response accessApplicationResponse) string {
+	messages := make([]string, 0, len(response.Errors))
+	for _, apiError := range response.Errors {
+		message := strings.TrimSpace(apiError.Message)
+		if message == "" {
+			continue
+		}
+		if len(message) > 256 {
+			message = message[:256]
+		}
+		messages = append(messages, message)
+		if len(messages) == 5 {
+			break
+		}
+	}
+	if len(messages) == 0 {
+		return ""
+	}
+	return ": " + strings.Join(messages, "; ")
 }
 
 // VerifyAccessPolicy verifies the recorded application and its complete policy surface.

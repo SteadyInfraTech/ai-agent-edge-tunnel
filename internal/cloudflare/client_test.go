@@ -150,12 +150,13 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 	tests := []struct {
 		name            string
 		appStatus       int
+		appFailure      bool
 		destinations    string
 		preflightBypass bool
 		policies        string
 		allowedEmails   []string
 		wantMatch       bool
-		wantErr         bool
+		wantErr         string
 	}{
 		{
 			name:          "exact email allowlist",
@@ -231,7 +232,19 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			name:          "application API error",
 			appStatus:     http.StatusInternalServerError,
 			allowedEmails: []string{"dev@example.com"},
-			wantErr:       true,
+			wantErr:       "test error",
+		},
+		{
+			name:          "Access read permission denied",
+			appStatus:     http.StatusForbidden,
+			allowedEmails: []string{"dev@example.com"},
+			wantErr:       "test error",
+		},
+		{
+			name:          "application unsuccessful response",
+			appFailure:    true,
+			allowedEmails: []string{"dev@example.com"},
+			wantErr:       "test error",
 		},
 	}
 	for _, tt := range tests {
@@ -256,7 +269,7 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 						application += `,"options_preflight_bypass":true`
 					}
 					application += "}"
-					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s}`, application)
+					_, _ = fmt.Fprintf(w, `{"success":%t,"errors":[{"code":1003,"message":"test error"}],"result":%s}`, !tt.appFailure, application)
 				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID+"/policies"):
 					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s,"result_info":{"page":1,"per_page":100,"count":1,"total_count":1,"total_pages":1}}`, tt.policies)
 				default:
@@ -271,8 +284,8 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			client := &RealCloudflareClient{AccountID: accountID, APIToken: "test-token", api: api}
 
 			matches, err := client.VerifyAccessPolicy(context.Background(), accountID, appID, appName, domain, tt.allowedEmails)
-			if tt.wantErr {
-				require.Error(t, err)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
