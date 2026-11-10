@@ -286,7 +286,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
 	require.NoError(t, k8s.Update(ctx, params))
 	terminating := newTunnel("restricted", "finalizer-cleanup", "zone-123", false)
-	terminating.Finalizers = []string{"edge.steadyinfra.com/cleanup"}
+	terminating.Finalizers = []string{FinalizerName}
 	require.NoError(t, k8s.Create(ctx, terminating))
 	require.NoError(t, k8s.Delete(ctx, terminating))
 	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
