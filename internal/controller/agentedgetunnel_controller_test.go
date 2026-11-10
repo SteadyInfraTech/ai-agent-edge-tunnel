@@ -79,6 +79,7 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 	}
 	h.r = &AgentEdgeTunnelReconciler{
 		Client:           k8s,
+		APIReader:        k8s,
 		Scheme:           scheme.Scheme,
 		CloudflareClient: h.cf,
 		AccountID:        "fake-account",
@@ -706,6 +707,122 @@ func TestRejectsInvalidServiceTarget(t *testing.T) {
 			assert.Zero(t, h.cf.CreateTunnelCalls, "nothing may be created for an invalid spec")
 		})
 	}
+}
+
+// TestRejectsUnsafeServiceTargetsBeforeProvisioning ensures a tunnel cannot
+// route through an ExternalName, headless, selectorless, or manually redirected
+// Service, or to a Pod outside the Service's own selector.
+func TestRejectsUnsafeServiceTargetsBeforeProvisioning(t *testing.T) {
+	cases := map[string]func(*harness){
+		"missing Service": func(h *harness) {
+			var service corev1.Service
+			require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker"}, &service))
+			require.NoError(h.t, h.k8s.Delete(context.Background(), &service))
+		},
+		"ExternalName Service": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.Type = corev1.ServiceTypeExternalName
+			service.Spec.ExternalName = "169.254.169.254"
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"headless Service": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.ClusterIP = corev1.ClusterIPNone
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"selectorless Service": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.Selector = nil
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"Service with externalIPs": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.ExternalIPs = []string{"192.0.2.10"}
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"requested port is not exposed": func(h *harness) {
+			cr := h.get()
+			cr.Spec.Service.Port = 9090
+			require.NoError(h.t, h.k8s.Update(context.Background(), &cr))
+		},
+		"EndpointSlice has no Pod reference": func(h *harness) {
+			slice := getTestEndpointSlice(h)
+			slice.Endpoints[0].TargetRef = nil
+			require.NoError(h.t, h.k8s.Update(context.Background(), slice))
+		},
+		"EndpointSlice points outside selected Pod": func(h *harness) {
+			slice := getTestEndpointSlice(h)
+			slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+			require.NoError(h.t, h.k8s.Update(context.Background(), slice))
+		},
+		"EndpointSlice references another namespace": func(h *harness) {
+			slice := getTestEndpointSlice(h)
+			slice.Endpoints[0].TargetRef.Namespace = "kube-system"
+			require.NoError(h.t, h.k8s.Update(context.Background(), slice))
+		},
+		"selected Pod uses host networking": func(h *harness) {
+			pod := getTestPod(h)
+			pod.Spec.HostNetwork = true
+			require.NoError(h.t, h.k8s.Update(context.Background(), pod))
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			mutate(h)
+			_, err := h.reconcile()
+			require.NoError(t, err, "an unsafe Service target is recorded as a policy failure")
+			assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+			assert.Contains(t, h.get().Status.Message, errUnsafeServiceTarget.Error())
+			assert.Zero(t, h.cf.CreateTunnelCalls, "Cloudflare resources must not be created for an unsafe origin")
+		})
+	}
+}
+
+// TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe ensures an
+// EndpointSlice change removes an already-exposed tunnel rather than leaving
+// it routed to an arbitrary address.
+func TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	require.Len(t, h.cf.Tunnels, 1)
+	require.NotEmpty(t, h.cf.DNSRecords)
+
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "service target became unsafe")
+	assert.Empty(t, h.cf.DNSRecords)
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.AccessApps)
+	h.assertConnectorGone()
+}
+
+func getTestService(h *harness) *corev1.Service {
+	h.t.Helper()
+	var service corev1.Service
+	require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker"}, &service))
+	return &service
+}
+
+func getTestPod(h *harness) *corev1.Pod {
+	h.t.Helper()
+	var pod corev1.Pod
+	require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker-pod"}, &pod))
+	return &pod
+}
+
+func getTestEndpointSlice(h *harness) *discoveryv1.EndpointSlice {
+	h.t.Helper()
+	var slice discoveryv1.EndpointSlice
+	require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker-slice"}, &slice))
+	return &slice
 }
 
 // TestAmbiguousAccessStatusWriteKeepsTheApplication checks: a failed status
