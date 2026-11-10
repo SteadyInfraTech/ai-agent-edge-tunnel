@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,6 +48,7 @@ type harness struct {
 func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), objs ...client.Object) *harness {
 	t.Helper()
 	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme.Scheme))
+	require.NoError(t, discoveryv1.AddToScheme(scheme.Scheme))
 
 	cr := &agentopsv1alpha1.AgentEdgeTunnel{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent-tunnel", Namespace: "default", UID: "11111111-aaaa-bbbb-cccc-222222222222"},
@@ -60,9 +62,12 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 	if mutate != nil {
 		mutate(cr)
 	}
+	fixtures := append(serviceTestFixtures(cr.Namespace, "langgraph-worker", "10.96.0.10", "10.244.0.10"), serviceTestFixtures(cr.Namespace, "support-agent", "10.96.0.11", "10.244.0.11")...)
+	objects := append([]client.Object{cr}, fixtures...)
+	objects = append(objects, objs...)
 	k8s := fakeclient.NewClientBuilder().
 		WithScheme(scheme.Scheme).
-		WithObjects(append([]client.Object{cr}, objs...)...).
+		WithObjects(objects...).
 		WithStatusSubresource(cr, &appsv1.Deployment{}, &agentopsv1alpha1.NamespaceTunnelQuota{}).
 		Build()
 	h := &harness{
@@ -85,6 +90,34 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 		Now:    func() time.Time { return h.now },
 	}
 	return h
+}
+
+// serviceTestFixtures builds a selector-backed ClusterIP Service and the
+// EndpointSlice the Kubernetes controller would publish for its selected Pod.
+func serviceTestFixtures(namespace, name, clusterIP, podIP string) []client.Object {
+	podName := name + "-pod"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, UID: types.UID("uid-" + podName), Labels: map[string]string{"app": name}},
+		Status:     corev1.PodStatus{PodIP: podIP, PodIPs: []corev1.PodIP{{IP: podIP}}},
+	}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Type:      corev1.ServiceTypeClusterIP,
+			ClusterIP: clusterIP,
+			Selector:  map[string]string{"app": name},
+			Ports:     []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+		},
+	}
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-slice", Namespace: namespace, Labels: map[string]string{discoveryv1.LabelServiceName: name}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{podIP},
+			TargetRef: &corev1.ObjectReference{APIVersion: "v1", Kind: "Pod", Namespace: namespace, Name: podName, UID: pod.UID},
+		}},
+	}
+	return []client.Object{service, pod, slice}
 }
 
 // reconcile runs one reconcile pass for the harness object.
