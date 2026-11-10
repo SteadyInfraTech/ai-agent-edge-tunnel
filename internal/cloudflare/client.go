@@ -325,8 +325,8 @@ type accessApplicationResponse struct {
 		Message string `json:"message"`
 	} `json:"errors"`
 	Result struct {
-		ID           string          `json:"id"`
-		Name         string          `json:"name"`
+		ID                     string          `json:"id"`
+		Name                   string          `json:"name"`
 		Domain                 string          `json:"domain"`
 		Destinations           json.RawMessage `json:"destinations"`
 		OptionsPreflightBypass bool            `json:"options_preflight_bypass"`
@@ -387,6 +387,8 @@ func (c *RealCloudflareClient) verifyAccessApplication(ctx context.Context, acco
 		Overrides json.RawMessage `json:"overrides"`
 	}
 	if err := json.Unmarshal(raw, &destinations); err != nil {
+		// Malformed destinations are policy drift, not transient API errors.
+		//nolint:nilerr // Deliberately fail closed on malformed destinations.
 		return false, nil
 	}
 	if len(destinations) == 0 {
@@ -404,6 +406,8 @@ func (c *RealCloudflareClient) verifyAccessApplication(ctx context.Context, acco
 	}
 	var overrides []json.RawMessage
 	if err := json.Unmarshal(destination.Overrides, &overrides); err != nil {
+		// Malformed overrides are policy drift, not transient API errors.
+		//nolint:nilerr // Deliberately fail closed on malformed overrides.
 		return false, nil
 	}
 	return len(overrides) == 0, nil
