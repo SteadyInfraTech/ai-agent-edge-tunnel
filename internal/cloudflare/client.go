@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/cloudflare/cloudflare-go"
 )
@@ -314,21 +317,104 @@ func (c *RealCloudflareClient) FindTunnels(ctx context.Context, name string) ([]
 	}
 }
 
-// VerifyAccessPolicy verifies the recorded application and its complete policy surface.
-// It fails closed on extra policies, non-email selectors, exclusions, requirements,
-// or any change to the allowlist. API errors are returned separately from drift.
-func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID, appID, name, domain string, allowedEmails []string) (bool, error) {
-	rc := cloudflare.AccountIdentifier(accountID)
-	app, err := c.api.GetAccessApplication(ctx, rc, appID)
+// accessApplicationResponse retains destination overrides that are not represented
+// by the older cloudflare-go AccessApplication model.
+type accessApplicationResponse struct {
+	Success bool `json:"success"`
+	Errors  []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+	Result struct {
+		ID           string          `json:"id"`
+		Name         string          `json:"name"`
+		Domain       string          `json:"domain"`
+		Destinations json.RawMessage `json:"destinations"`
+	} `json:"result"`
+}
+
+// verifyAccessApplication checks the application identity and its destination
+// configuration. Cloudflare destination overrides can make matching paths public,
+// bypassing Access authentication, so any configured override is treated as drift.
+func (c *RealCloudflareClient) verifyAccessApplication(ctx context.Context, accountID, appID, name, domain string) (bool, error) {
+	endpoint := strings.TrimRight(c.api.BaseURL, "/") + "/accounts/" +
+		url.PathEscape(accountID) + "/access/apps/" + url.PathEscape(appID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		if isNotFound(err) {
-			return false, nil
-		}
+		return false, fmt.Errorf("building Access application request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIToken)
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
 		return false, fmt.Errorf("getting Access application %s: %w", appID, err)
 	}
-	if app.ID != appID || app.Name != name || app.Domain != domain {
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("getting Access application %s: Cloudflare returned HTTP %d", appID, resp.StatusCode)
+	}
+
+	var application accessApplicationResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&application); err != nil {
+		return false, fmt.Errorf("decoding Access application %s: %w", appID, err)
+	}
+	if !application.Success {
+		return false, fmt.Errorf("getting Access application %s: Cloudflare reported an unsuccessful response", appID)
+	}
+	if application.Result.ID != appID || application.Result.Name != name || application.Result.Domain != domain {
+		return false, nil
+	}
+
+	// Older applications may omit destinations and use the single domain field.
+	// When destinations are returned, require exactly the intended public hostname
+	// and reject every override, including unknown or future override behaviors.
+	raw := application.Result.Destinations
+	if len(raw) == 0 || string(raw) == "null" {
+		return true, nil
+	}
+	var destinations []struct {
+		Type      string          `json:"type"`
+		URI       string          `json:"uri"`
+		Overrides json.RawMessage `json:"overrides"`
+	}
+	if err := json.Unmarshal(raw, &destinations); err != nil {
+		return false, nil
+	}
+	if len(destinations) == 0 {
+		return true, nil
+	}
+	if len(destinations) != 1 {
+		return false, nil
+	}
+	destination := destinations[0]
+	if (destination.Type != "" && destination.Type != "public") || destination.URI != domain {
+		return false, nil
+	}
+	if len(destination.Overrides) == 0 || string(destination.Overrides) == "null" {
+		return true, nil
+	}
+	var overrides []json.RawMessage
+	if err := json.Unmarshal(destination.Overrides, &overrides); err != nil {
+		return false, nil
+	}
+	return len(overrides) == 0, nil
+}
+
+// VerifyAccessPolicy verifies the recorded application and its complete policy surface.
+// It fails closed on destination overrides, extra policies, non-email selectors,
+// exclusions, requirements, or any change to the allowlist. API errors are returned
+// separately from confirmed drift.
+func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID, appID, name, domain string, allowedEmails []string) (bool, error) {
+	matches, err := c.verifyAccessApplication(ctx, accountID, appID, name, domain)
+	if err != nil || !matches {
+		return matches, err
+	}
+	rc := cloudflare.AccountIdentifier(accountID)
 	policies, _, err := c.api.ListAccessPolicies(ctx, rc, cloudflare.ListAccessPoliciesParams{ApplicationID: appID})
 	if err != nil {
 		return false, fmt.Errorf("listing policies for Access application %s: %w", appID, err)
