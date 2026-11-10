@@ -38,9 +38,9 @@ var (
 )
 
 const (
-	serviceTargetRetryLimit    int32 = 3
-	serviceTargetRetryInterval       = 2 * time.Second
-	serviceTargetFailedRequeue       = 10 * time.Second
+	serviceTargetGracePeriod   = 30 * time.Second
+	serviceTargetRetryInterval = 2 * time.Second
+	serviceTargetFailedRequeue = 10 * time.Second
 )
 
 const (
@@ -1006,25 +1006,33 @@ func (r *AgentEdgeTunnelReconciler) verifyTunnelServiceTarget(ctx context.Contex
 		}
 	}
 	if target == nil {
-		if t.Status.ServiceTargetVerificationTarget != "" || t.Status.ServiceTargetVerificationAttempts != 0 {
+		if t.Status.ServiceTargetVerificationTarget != "" || t.Status.ServiceTargetVerificationAttempts != 0 || t.Status.ServiceTargetVerificationSince != nil {
 			t.Status.ServiceTargetVerificationTarget = ""
 			t.Status.ServiceTargetVerificationAttempts = 0
+			t.Status.ServiceTargetVerificationSince = nil
 			return r.Status().Update(ctx, t)
 		}
 		return nil
 	}
 	targetKey := fmt.Sprintf("%s:%d", target.Name, target.Port)
+	statusChanged := false
 	if t.Status.ServiceTargetVerificationTarget != targetKey {
 		t.Status.ServiceTargetVerificationTarget = targetKey
 		t.Status.ServiceTargetVerificationAttempts = 0
+		t.Status.ServiceTargetVerificationSince = nil
+		statusChanged = true
 	}
 	if err := r.verifyServiceTarget(ctx, t.Namespace, target); err != nil {
 		return err
 	}
-	if t.Status.ServiceTargetVerificationAttempts != 0 {
+	if t.Status.ServiceTargetVerificationAttempts != 0 || t.Status.ServiceTargetVerificationSince != nil {
 		t.Status.ServiceTargetVerificationAttempts = 0
+		t.Status.ServiceTargetVerificationSince = nil
+		statusChanged = true
+	}
+	if statusChanged {
 		if err := r.Status().Update(ctx, t); err != nil {
-			return fmt.Errorf("resetting Service target verification retries: %w", err)
+			return fmt.Errorf("resetting Service target verification state: %w", err)
 		}
 	}
 	return nil
@@ -1132,23 +1140,34 @@ func (r *AgentEdgeTunnelReconciler) verifyServiceTarget(ctx context.Context, nam
 }
 
 // handleServiceTargetVerificationError retries rollout-related endpoint
-// mismatches for a bounded period, but still terminates a tunnel if the
-// inconsistency persists. Definitive unsafe configuration is rejected
-// immediately.
+// mismatches for a bounded grace period. The deadline is persisted in status,
+// so status updates and watch events cannot consume the retry window early.
+// Definitive unsafe configuration is rejected immediately.
 func (r *AgentEdgeTunnelReconciler) handleServiceTargetVerificationError(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, cause error) (ctrl.Result, error) {
 	if errors.Is(cause, errTransientServiceTarget) {
-		if t.Status.ServiceTargetVerificationAttempts < serviceTargetRetryLimit {
-			t.Status.ServiceTargetVerificationAttempts++
-			t.Status.Message = fmt.Sprintf("waiting for Kubernetes Service endpoints to converge (%d/%d): %s", t.Status.ServiceTargetVerificationAttempts, serviceTargetRetryLimit, cause)
+		now := r.now()
+		if t.Status.ServiceTargetVerificationSince == nil {
+			since := metav1.NewTime(now)
+			t.Status.ServiceTargetVerificationSince = &since
+			t.Status.ServiceTargetVerificationAttempts = 1
+			t.Status.Message = "waiting for Kubernetes Service endpoints to converge: " + cause.Error()
 			if t.Status.TunnelID == "" {
 				t.Status.Phase = agentopsv1alpha1.PhasePending
 			}
 			if err := r.Status().Update(ctx, t); err != nil {
-				return ctrl.Result{}, fmt.Errorf("recording Service target retry: %w", err)
+				return ctrl.Result{}, fmt.Errorf("recording Service target verification start: %w", err)
 			}
-			return ctrl.Result{RequeueAfter: serviceTargetRetryInterval}, nil
 		}
-		cause = fmt.Errorf("%w: Service endpoints remained inconsistent after %d retries: %v", errUnsafeServiceTarget, serviceTargetRetryLimit, cause)
+		elapsed := now.Sub(t.Status.ServiceTargetVerificationSince.Time)
+		if elapsed < serviceTargetGracePeriod {
+			remaining := serviceTargetGracePeriod - elapsed
+			requeueAfter := serviceTargetRetryInterval
+			if remaining < requeueAfter {
+				requeueAfter = remaining
+			}
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
+		cause = fmt.Errorf("%w: Service endpoints remained inconsistent for %s: %v", errUnsafeServiceTarget, serviceTargetGracePeriod, cause)
 	}
 
 	if errors.Is(cause, errUnsafeServiceTarget) {
