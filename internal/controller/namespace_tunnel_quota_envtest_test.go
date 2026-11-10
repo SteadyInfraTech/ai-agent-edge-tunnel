@@ -172,7 +172,6 @@ func TestNamespaceQuotaEnvtest(t *testing.T) {
 	require.ErrorIs(t, reconciler.ensureQuotaReservation(ctx, newTunnel, false), errQuotaExhausted)
 }
 
-
 // TestTenantAdmissionPolicyEnvtest exercises the checked-in admission policy
 // against a real API server, including zone pinning and the exact public namespace allowlist.
 func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
