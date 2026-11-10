@@ -149,9 +149,10 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 	validPolicy := `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[],"require":[]}]`
 	tests := []struct {
 		name          string
-		appStatus     int
-		destinations  string
-		policies      string
+		appStatus            int
+		destinations         string
+		preflightBypass      bool
+		policies             string
 		allowedEmails []string
 		wantMatch     bool
 		wantErr       bool
@@ -201,6 +202,12 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			wantMatch:     true,
 		},
 		{
+			name:          "options preflight bypass",
+			preflightBypass: true,
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
 			name:          "public destination override",
 			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\",\"overrides\":[{\"behavior\":\"public\",\"path_pattern\":\"/health\"}]}]",
 			allowedEmails: []string{"dev@example.com"},
@@ -244,6 +251,9 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 					application := fmt.Sprintf(`{"id":%q,"name":%q,"domain":%q`, appID, appName, domain)
 					if tt.destinations != "" {
 						application += `,"destinations":` + tt.destinations
+					}
+					if tt.preflightBypass {
+						application += `,"options_preflight_bypass":true`
 					}
 					application += "}"
 					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s}`, application)
