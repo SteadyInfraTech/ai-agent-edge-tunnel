@@ -290,6 +290,25 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, quotaAdminClient.Update(ctx, quota))
 	require.NoError(t, quotaAdminClient.Delete(ctx, quota))
 
+	// A missing parameter ConfigMap must not lock out cluster administrators,
+	// but configured namespace-quota admin groups must fail closed.
+	require.NoError(t, k8s.Delete(ctx, params))
+	breakGlassQuota := quotaObject()
+	require.NoError(t, k8s.Create(ctx, breakGlassQuota), "system:masters must retain quota recovery access without policy parameters")
+	require.NoError(t, tenantClient.Create(ctx, quotaObject()), "non-admin groups must remain denied when policy parameters are missing")
+	require.NoError(t, k8s.Delete(ctx, breakGlassQuota))
+	params = &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
+		Data: map[string]string{
+			"CLOUDFLARE_ZONE_ID":     "zone-123",
+			"CLOUDFLARE_ZONE_NAME":   "example.com",
+			"EDGE_BASE_DOMAIN":       "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
+			"EDGE_QUOTA_ADMIN_GROUPS": "quota-admins",
+		},
+	}
+	require.NoError(t, k8s.Create(ctx, params))
+
 	// The API server may need a short interval to observe the policy and binding.
 	// Probe enforcement itself instead of depending on status controllers that
 	// envtest does not necessarily run.
