@@ -1,6 +1,7 @@
 module github.com/SteadyInfraTech/ai-agent-edge-tunnel
 
-go 1.22.0
+go 1.27.0
+toolchain go1.27.3
 
 require (
 	github.com/cloudflare/cloudflare-go v0.119.0
