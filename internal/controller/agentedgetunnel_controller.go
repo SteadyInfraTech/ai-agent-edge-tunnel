@@ -12,6 +12,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -104,6 +105,8 @@ func (r *AgentEdgeTunnelReconciler) now() time.Time {
 // +kubebuilder:rbac:groups=edge.steadyinfra.com,resources=agentedgetunnels/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.steadyinfra.com,resources=agentsessions,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services;pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;delete
 func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var tunnel agentopsv1alpha1.AgentEdgeTunnel
@@ -152,6 +155,21 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if tunnel.Status.TunnelID != "" {
 		if err := r.validateOperatorPolicy(&tunnel); err != nil {
 			return ctrl.Result{}, r.terminate(ctx, &tunnel, "operator security policy changed; resources removed: "+err.Error())
+		}
+	}
+
+	// Revalidate the target before reading the session or reconciling Cloudflare.
+	// Service and EndpointSlice changes can redirect an already-active connector.
+	if tunnel.Status.TunnelID != "" && hasConnector(&tunnel) {
+		if err := r.validateServiceTarget(ctx, &tunnel); err != nil {
+			if errors.Is(err, errUnsafeServiceTarget) {
+				return ctrl.Result{}, r.terminate(ctx, &tunnel, "service target became unsafe; Cloudflare resources removed: "+err.Error())
+			}
+			tunnel.Status.Message = "UNVERIFIED: unable to verify Service target: " + err.Error()
+			if statusErr := r.Status().Update(ctx, &tunnel); statusErr != nil {
+				log.FromContext(ctx).Error(statusErr, "Failed to record Service target verification error in status")
+			}
+			return ctrl.Result{}, fmt.Errorf("verifying Service target: %w", err)
 		}
 	}
 
@@ -371,6 +389,18 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		t.Status.Phase = agentopsv1alpha1.PhaseFailed
 		t.Status.Message = err.Error()
 		return ctrl.Result{}, r.Status().Update(ctx, t)
+	}
+
+	if err := r.validateServiceTarget(ctx, t); err != nil {
+		if errors.Is(err, errUnsafeServiceTarget) {
+			if t.Status.TunnelID != "" {
+				return ctrl.Result{}, r.terminate(ctx, t, "service target became unsafe; Cloudflare resources removed: "+err.Error())
+			}
+			t.Status.Phase = agentopsv1alpha1.PhaseFailed
+			t.Status.Message = err.Error()
+			return ctrl.Result{}, r.Status().Update(ctx, t)
+		}
+		return r.fail(ctx, t, fmt.Errorf("verifying Service target: %w", err))
 	}
 
 	if err := r.ensureQuotaReservation(ctx, t, t.Status.TunnelID != ""); err != nil {
@@ -1017,6 +1047,8 @@ func (r *AgentEdgeTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentopsv1alpha1.AgentEdgeTunnel{}).
 		Owns(&appsv1.Deployment{}).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.mapServiceEvent)).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.mapEndpointSliceEvent)).
 		Watches(&agentopsv1alpha1.NamespaceTunnelQuota{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, obj client.Object) []reconcile.Request {
 				var tunnels agentopsv1alpha1.AgentEdgeTunnelList
