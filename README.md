@@ -195,6 +195,7 @@ quota write permissions to tenant roles even with this policy installed.
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | Required. The operator exits at startup if either is missing. The token needs Tunnel, DNS and Access edit permissions. |
 | `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_ZONE_NAME` | Required. Pins this operator instance to one Cloudflare zone; the base domain must be the zone apex or one of its subdomains, and each object's `spec.cloudflare.zoneID` must match. |
 | `EDGE_PUBLIC_NAMESPACES` | Optional comma-separated namespace allowlist for `security.allowPublic: true`. Empty or unset denies public tunnels in every namespace. |
+| `EDGE_QUOTA_ADMIN_GROUPS` | Optional comma-separated Kubernetes groups authorized to create, update, or delete `NamespaceTunnelQuota` objects. `system:masters` is always authorized. |
 | `--base-domain` / `EDGE_BASE_DOMAIN` | Required. Hostnames are `<subdomain>.<base-domain>`. |
 | `--connector-image` / `CONNECTOR_IMAGE` | Required. The cloudflared image; pin a version or digest. |
 | `--leader-elect` | Enable when running more than one replica. |
@@ -214,7 +215,7 @@ kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
   --from-literal=CLOUDFLARE_ZONE_ID=<zone-id> \
   --from-literal=CLOUDFLARE_ZONE_NAME=example.com \
   --from-literal=CONNECTOR_IMAGE=<pinned cloudflared image> \
-  --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public \\\n  --from-literal=EDGE_QUOTA_ADMIN_GROUPS=platform-admins
+  --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public \
 make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
 make deploy IMG=<your-registry>/ai-agent-edge-tunnel:<tag>        # needs the kustomize CLI
 kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml
