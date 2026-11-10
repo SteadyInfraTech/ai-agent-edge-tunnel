@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/cloudflare/cloudflare-go"
 )
@@ -403,8 +404,11 @@ type accessApplicationConfig struct {
 }
 
 func (c *RealCloudflareClient) getAccessApplicationConfig(ctx context.Context, accountID, appID string) (*accessApplicationConfig, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	endpoint := strings.TrimRight(c.api.BaseURL, "/") + "/accounts/" + url.PathEscape(accountID) + "/access/apps/" + url.PathEscape(appID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request for Access application %s: %w", appID, err)
 	}
