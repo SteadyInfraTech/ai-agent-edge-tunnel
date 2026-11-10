@@ -192,10 +192,6 @@ spec:
               expiresAt:
                 type: string
                 format: date-time
-              serviceTargetVerificationAttempts:
-                type: integer
-                format: int32
-                minimum: 0
               serviceTargetVerificationSince:
                 type: string
                 format: date-time
