@@ -264,7 +264,7 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			api, err := cloudflare.NewWithAPIToken("test-token")
 			require.NoError(t, err)
 			api.BaseURL = server.URL + "/client/v4"
-			client := &RealCloudflareClient{AccountID: accountID, api: api}
+			client := &RealCloudflareClient{AccountID: accountID, APIToken: "test-token", api: api}
 
 			matches, err := client.VerifyAccessPolicy(context.Background(), accountID, appID, appName, domain, tt.allowedEmails)
 			if tt.wantErr {
