@@ -58,5 +58,6 @@ spec:
       !has(object.spec.security) ||
       !has(object.spec.security.allowPublic) ||
       !object.spec.security.allowPublic ||
-      params.data['EDGE_PUBLIC_NAMESPACES'].split(',').exists(ns, ns.trim() == request.namespace))
+      ('EDGE_PUBLIC_NAMESPACES' in params.data &&
+       params.data['EDGE_PUBLIC_NAMESPACES'].split(',').exists(ns, ns.trim() == request.namespace)))
     message: security.allowPublic is permitted only in namespaces listed in EDGE_PUBLIC_NAMESPACES
