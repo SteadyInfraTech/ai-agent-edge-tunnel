@@ -11,8 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -41,6 +43,77 @@ type harness struct {
 	now time.Time
 }
 
+// defaultServiceFixtures supplies a safe selector-backed Service and a
+// controller-managed EndpointSlice for the harness's connector target.
+func defaultServiceFixtures(target *agentopsv1alpha1.ServiceTarget, namespace string) []client.Object {
+	selector := map[string]string{"app.kubernetes.io/name": target.Name}
+	podName := target.Name + "-0"
+	podUID := types.UID("pod-" + target.Name)
+	port := target.Port
+	protocol := corev1.ProtocolTCP
+	return []client.Object{
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: target.Name, Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Type:      corev1.ServiceTypeClusterIP,
+				ClusterIP: "10.96.0.10",
+				Selector:  selector,
+				Ports:     []corev1.ServicePort{{Port: target.Port, Protocol: protocol}},
+			},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, UID: podUID, Labels: selector},
+			Status: corev1.PodStatus{
+				PodIP:  "10.244.0.10",
+				PodIPs: []corev1.PodIP{{IP: "10.244.0.10"}},
+			},
+		},
+		&discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      target.Name + "-slice",
+				Namespace: namespace,
+				Labels:    map[string]string{discoveryv1.LabelServiceName: target.Name},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Ports:       []discoveryv1.EndpointPort{{Port: &port, Protocol: &protocol}},
+			Endpoints: []discoveryv1.Endpoint{{
+				Addresses: []string{"10.244.0.10"},
+				TargetRef: &corev1.ObjectReference{APIVersion: "v1", Kind: "Pod", Namespace: namespace, Name: podName, UID: podUID},
+			}},
+		},
+	}
+}
+
+func hasFixture[T client.Object](objs []client.Object, want T) bool {
+	for _, obj := range objs {
+		if _, ok := obj.(T); ok && client.ObjectKeyFromObject(obj) == client.ObjectKeyFromObject(want) {
+			return true
+		}
+	}
+	return false
+}
+
+func harnessServiceTarget(cr *agentopsv1alpha1.AgentEdgeTunnel, objs []client.Object) *agentopsv1alpha1.ServiceTarget {
+	if cr.Spec.Service != nil {
+		return cr.Spec.Service
+	}
+	if cr.Spec.SessionRef == nil {
+		return nil
+	}
+	for _, obj := range objs {
+		session, ok := obj.(*unstructured.Unstructured)
+		if !ok || session.GetKind() != "AgentSession" || session.GetNamespace() != cr.Namespace || session.GetName() != cr.Spec.SessionRef.Name {
+			continue
+		}
+		endpoint, _, _ := unstructured.NestedString(session.Object, "status", "endpoint")
+		target, err := parseEndpoint(endpoint, cr.Namespace)
+		if err == nil {
+			return target
+		}
+	}
+	return nil
+}
+
 // newHarness builds a reconciler around one AgentEdgeTunnel. The default object
 // is the common case: protected by an email policy and routed to a Service.
 // mutate adjusts it before it is stored.
@@ -60,9 +133,30 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 	if mutate != nil {
 		mutate(cr)
 	}
+	objects := []client.Object{cr}
+	if target := harnessServiceTarget(cr, objs); target != nil {
+		defaults := defaultServiceFixtures(target, cr.Namespace)
+		for _, fixture := range defaults {
+			switch fixture.(type) {
+			case *corev1.Service:
+				if !hasFixture(objs, fixture.(*corev1.Service)) {
+					objects = append(objects, fixture)
+				}
+			case *corev1.Pod:
+				if !hasFixture(objs, fixture.(*corev1.Pod)) {
+					objects = append(objects, fixture)
+				}
+			case *discoveryv1.EndpointSlice:
+				if !hasFixture(objs, fixture.(*discoveryv1.EndpointSlice)) {
+					objects = append(objects, fixture)
+				}
+			}
+		}
+	}
+	objects = append(objects, objs...)
 	k8s := fakeclient.NewClientBuilder().
 		WithScheme(scheme.Scheme).
-		WithObjects(append([]client.Object{cr}, objs...)...).
+		WithObjects(objects...).
 		WithStatusSubresource(cr, &appsv1.Deployment{}, &agentopsv1alpha1.NamespaceTunnelQuota{}).
 		Build()
 	h := &harness{
@@ -74,6 +168,7 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 	}
 	h.r = &AgentEdgeTunnelReconciler{
 		Client:           k8s,
+		APIReader:        k8s,
 		Scheme:           scheme.Scheme,
 		CloudflareClient: h.cf,
 		AccountID:        "fake-account",
