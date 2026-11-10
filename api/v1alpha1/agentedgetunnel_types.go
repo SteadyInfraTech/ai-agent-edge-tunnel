@@ -111,9 +111,12 @@ type AgentEdgeTunnelStatus struct {
 	// session bound to a different endpoint later ends the tunnel.
 	SessionEndpoint string       `json:"sessionEndpoint,omitempty"`
 	ExpiresAt       *metav1.Time `json:"expiresAt,omitempty"`
-	// ServiceTargetVerificationAttempts bounds retries for transient Pod/EndpointSlice rollout races.
+	// ServiceTargetVerificationAttempts records the first transient verification failure.
+	// Retries are bounded by ServiceTargetVerificationSince, not by reconcile count.
 	ServiceTargetVerificationAttempts int32 `json:"serviceTargetVerificationAttempts,omitempty"`
-	// ServiceTargetVerificationTarget identifies the Service target associated with the retry count.
+	// ServiceTargetVerificationSince is the start of the current transient mismatch grace period.
+	ServiceTargetVerificationSince *metav1.Time `json:"serviceTargetVerificationSince,omitempty"`
+	// ServiceTargetVerificationTarget identifies the Service target associated with the grace period.
 	ServiceTargetVerificationTarget string `json:"serviceTargetVerificationTarget,omitempty"`
 }
 
