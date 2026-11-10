@@ -47,6 +47,9 @@ func (r *AgentEdgeTunnelReconciler) validateServiceTarget(ctx context.Context, t
 	if service.Spec.Type == corev1.ServiceTypeExternalName {
 		return fmt.Errorf("%w: Service %s/%s is ExternalName", errUnsafeServiceTarget, tunnel.Namespace, service.Name)
 	}
+	if service.Spec.ClusterIP == "" {
+		return fmt.Errorf("%w: Service %s/%s has no ClusterIP", errUnsafeServiceTarget, tunnel.Namespace, service.Name)
+	}
 	if service.Spec.ClusterIP == corev1.ClusterIPNone {
 		return fmt.Errorf("%w: Service %s/%s is headless", errUnsafeServiceTarget, tunnel.Namespace, service.Name)
 	}
