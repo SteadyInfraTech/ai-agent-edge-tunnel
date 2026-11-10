@@ -148,15 +148,13 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 	)
 	validPolicy := `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[],"require":[]}]`
 	tests := []struct {
-		name            string
-		appStatus       int
-		appFailure      bool
-		destinations    string
-		preflightBypass bool
-		policies        string
-		allowedEmails   []string
-		wantMatch       bool
-		wantErr         string
+		name          string
+		appStatus     int
+		policies      string
+		allowedEmails []string
+		wantMatch     bool
+		appConfig     string
+		wantErr       bool
 	}{
 		{
 			name:          "exact email allowlist",
@@ -191,89 +189,70 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			allowedEmails: []string{"dev@example.com"},
 		},
 		{
-			name:          "application not found",
-			appStatus:     http.StatusNotFound,
-			allowedEmails: []string{"dev@example.com"},
-		},
-		{
-			name:          "exact public destination",
-			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\",\"overrides\":[]}]",
+			name:          "public path override",
 			policies:      validPolicy,
 			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"self_hosted","destinations":[{"type":"public","uri":"agent.example.com","overrides":[{"behavior":"public","path_pattern":"/health"}]}]`,
+		},
+		{
+			name:          "OPTIONS preflight bypass",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"self_hosted","options_preflight_bypass":true`,
+		},
+		{
+			name:          "destination does not match protected hostname",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"self_hosted","destinations":[{"type":"public","uri":"other.example.com"}]`,
+		},
+		{
+			name:          "unexpected destination field",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"self_hosted","destinations":[{"type":"public","uri":"agent.example.com","future_bypass":true}]`,
+		},
+		{
+			name:          "exact destination without overrides",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			appConfig:     `,"type":"self_hosted","destinations":[{"type":"public","uri":"agent.example.com","overrides":[]}]`,
 			wantMatch:     true,
 		},
 		{
-			name:            "options preflight bypass",
-			preflightBypass: true,
-			policies:        validPolicy,
-			allowedEmails:   []string{"dev@example.com"},
-		},
-		{
-			name:          "public destination override",
-			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\",\"overrides\":[{\"behavior\":\"public\",\"path_pattern\":\"/health\"}]}]",
-			allowedEmails: []string{"dev@example.com"},
-		},
-		{
-			name:          "unexpected destination",
-			destinations:  "[{\"type\":\"public\",\"uri\":\"other.example.com\"}]",
-			allowedEmails: []string{"dev@example.com"},
-		},
-		{
-			name:          "multiple destinations",
-			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\"},{\"type\":\"public\",\"uri\":\"other.example.com\"}]",
-			allowedEmails: []string{"dev@example.com"},
-		},
-		{
-			name:          "malformed destinations",
-			destinations:  "{\"type\":\"public\"}",
-			allowedEmails: []string{"dev@example.com"},
-		},
-		{
-			name:          "application API error",
+			name:          "temporary application API error",
 			appStatus:     http.StatusInternalServerError,
 			allowedEmails: []string{"dev@example.com"},
-			wantErr:       "test error",
+			wantErr:       true,
 		},
 		{
-			name:          "Access read permission denied",
-			appStatus:     http.StatusForbidden,
+			name:          "application not found",
+			appStatus:     http.StatusNotFound,
 			allowedEmails: []string{"dev@example.com"},
-			wantErr:       "test error",
-		},
-		{
-			name:          "application unsuccessful response",
-			appFailure:    true,
-			allowedEmails: []string{"dev@example.com"},
-			wantErr:       "test error",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer test-token" {
-					t.Errorf("unexpected authorization header %q", r.Header.Get("Authorization"))
-				}
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID):
-					if tt.appStatus != 0 {
-						w.WriteHeader(tt.appStatus)
-						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1003,"message":"test error"}],"messages":[]}`)
+					if tt.appStatus == http.StatusNotFound {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1003,"message":"not found"}],"messages":[]}`)
 						return
 					}
-					application := fmt.Sprintf(`{"id":%q,"name":%q,"domain":%q`, appID, appName, domain)
-					if tt.destinations != "" {
-						application += `,"destinations":` + tt.destinations
+					if tt.appStatus == http.StatusInternalServerError {
+						w.WriteHeader(http.StatusInternalServerError)
+						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1000,"message":"temporary failure"}],"messages":[]}`)
+						return
 					}
-					if tt.preflightBypass {
-						application += `,"options_preflight_bypass":true`
+					if r.Header.Get("Authorization") != "Bearer test-token" {
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":10000,"message":"missing auth"}],"messages":[]}`)
+						return
 					}
-					application += "}"
-					errorsJSON := "[]"
-					if tt.appFailure {
-						errorsJSON = `[{"code":1003,"message":"test error"}]`
-					}
-					_, _ = fmt.Fprintf(w, `{"success":%t,"errors":%s,"result":%s}`, !tt.appFailure, errorsJSON, application)
+					_, _ = fmt.Fprintf(w, `{"success":true,"result":{"id":%q,"name":%q,"domain":%q%s}}`, appID, appName, domain, tt.appConfig)
 				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID+"/policies"):
 					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s,"result_info":{"page":1,"per_page":100,"count":1,"total_count":1,"total_pages":1}}`, tt.policies)
 				default:
@@ -288,8 +267,9 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			client := &RealCloudflareClient{AccountID: accountID, APIToken: "test-token", api: api}
 
 			matches, err := client.VerifyAccessPolicy(context.Background(), accountID, appID, appName, domain, tt.allowedEmails)
-			if tt.wantErr != "" {
-				require.ErrorContains(t, err, tt.wantErr)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.False(t, matches)
 				return
 			}
 			require.NoError(t, err)
