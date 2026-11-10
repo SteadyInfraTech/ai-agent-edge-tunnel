@@ -163,14 +163,11 @@ func (r *AgentEdgeTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Service and EndpointSlice changes can redirect an already-active connector.
 	if tunnel.Status.TunnelID != "" && hasConnector(&tunnel) {
 		if err := r.validateServiceTarget(ctx, &tunnel); err != nil {
+			reason := "unable to verify Service target; Cloudflare resources removed to fail closed: " + err.Error()
 			if errors.Is(err, errUnsafeServiceTarget) {
-				return ctrl.Result{}, r.terminate(ctx, &tunnel, "service target became unsafe; Cloudflare resources removed: "+err.Error())
+				reason = "service target became unsafe; Cloudflare resources removed: " + err.Error()
 			}
-			tunnel.Status.Message = "UNVERIFIED: unable to verify Service target: " + err.Error()
-			if statusErr := r.Status().Update(ctx, &tunnel); statusErr != nil {
-				log.FromContext(ctx).Error(statusErr, "Failed to record Service target verification error in status")
-			}
-			return ctrl.Result{}, fmt.Errorf("verifying Service target: %w", err)
+			return ctrl.Result{}, r.terminate(ctx, &tunnel, reason)
 		}
 	}
 
