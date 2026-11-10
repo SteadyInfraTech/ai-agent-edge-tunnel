@@ -63,7 +63,7 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 		ZoneID:           "zone",
 		BaseDomain:       "agents.example.com",
 		ConnectorImage:   testImage,
-		DryRun:            true,
+		DryRun:           true,
 	}
 	require.NoError(t, reconciler.SetupWithManager(mgr))
 
@@ -91,23 +91,23 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker", Namespace: namespace},
 		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
+			Type:      corev1.ServiceTypeClusterIP,
 			ClusterIP: "10.96.0.10",
-			Selector: map[string]string{"app": "langgraph-worker"},
-			Ports: []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+			Selector:  map[string]string{"app": "langgraph-worker"},
+			Ports:     []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, service))
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker-pod", Namespace: namespace, Labels: map[string]string{"app": "langgraph-worker"}},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "example.invalid/test"}}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "example.invalid/test"}}},
 	}
 	require.NoError(t, k8s.Create(ctx, pod))
 	pod.Status.PodIP = "10.244.0.10"
 	pod.Status.PodIPs = []corev1.PodIP{{IP: "10.244.0.10"}}
 	require.NoError(t, k8s.Status().Update(ctx, pod))
 	slice := &discoveryv1.EndpointSlice{
-		ObjectMeta: metav1.ObjectMeta{Name: "langgraph-worker-slice", Namespace: namespace, Labels: map[string]string{discoveryv1.LabelServiceName: "langgraph-worker"}},
+		ObjectMeta:  metav1.ObjectMeta{Name: "langgraph-worker-slice", Namespace: namespace, Labels: map[string]string{discoveryv1.LabelServiceName: "langgraph-worker"}},
 		AddressType: discoveryv1.AddressTypeIPv4,
 		Endpoints: []discoveryv1.Endpoint{{
 			Addresses: []string{"10.244.0.10"},
