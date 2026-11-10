@@ -166,7 +166,7 @@ func (c *Client) VerifyAccessPolicy(_ context.Context, _, appID, name, domain st
 	app, ok := c.AccessApps[appID]
 	if !ok || app.Name != name || app.Domain != domain || app.HasPublicOverride {
 		return false, nil
-}
+	}
 	want := make(map[string]struct{}, len(allowedEmails))
 	for _, email := range allowedEmails {
 		want[strings.ToLower(strings.TrimSpace(email))] = struct{}{}

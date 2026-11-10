@@ -430,7 +430,7 @@ func (c *RealCloudflareClient) getAccessApplicationConfig(ctx context.Context, a
 	}
 
 	var envelope struct {
-		Success bool            `json:"success"`
+		Success bool `json:"success"`
 		Errors  []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
