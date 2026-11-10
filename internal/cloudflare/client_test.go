@@ -194,6 +194,13 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			allowedEmails: []string{"dev@example.com"},
 		},
 		{
+			name:          "exact public destination",
+			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\",\"overrides\":[]}]",
+			policies:      validPolicy,
+			allowedEmails: []string{"dev@example.com"},
+			wantMatch:     true,
+		},
+		{
 			name:          "public destination override",
 			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\",\"overrides\":[{\"behavior\":\"public\",\"path_pattern\":\"/health\"}]}]",
 			allowedEmails: []string{"dev@example.com"},
@@ -223,6 +230,9 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer test-token" {
+					t.Errorf("unexpected authorization header %q", r.Header.Get("Authorization"))
+				}
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID):
@@ -248,7 +258,7 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			api, err := cloudflare.NewWithAPIToken("test-token")
 			require.NoError(t, err)
 			api.BaseURL = server.URL + "/client/v4"
-			client := &RealCloudflareClient{AccountID: accountID, api: api}
+			client := &RealCloudflareClient{AccountID: accountID, APIToken: "test-token", api: api}
 
 			matches, err := client.VerifyAccessPolicy(context.Background(), accountID, appID, appName, domain, tt.allowedEmails)
 			if tt.wantErr {
