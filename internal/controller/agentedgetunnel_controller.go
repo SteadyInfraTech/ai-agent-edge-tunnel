@@ -32,8 +32,14 @@ import (
 )
 
 var (
-	errAccessPolicyDrift   = errors.New("cloudflare access policy drift detected")
-	errUnsafeServiceTarget = errors.New("service target is not safe to expose")
+	errAccessPolicyDrift    = errors.New("cloudflare access policy drift detected")
+	errUnsafeServiceTarget  = errors.New("service target is not safe to expose")
+	errTransientServiceTarget = errors.New("service target endpoints are not yet settled")
+)
+
+const (
+	serviceTargetRetryLimit    int32 = 3
+	serviceTargetRetryInterval       = 2 * time.Second
 )
 
 const (
@@ -286,10 +292,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		return ctrl.Result{}, r.terminate(ctx, t, "TTL expired; Cloudflare resources removed")
 	}
 	if err := r.verifyTunnelServiceTarget(ctx, t); err != nil {
-		if errors.Is(err, errUnsafeServiceTarget) {
-			return ctrl.Result{}, r.terminate(ctx, t, "service target became unsafe; tunnel removed: "+err.Error())
-		}
-		return ctrl.Result{}, fmt.Errorf("verifying Service target: %w", err)
+		return r.handleServiceTargetVerificationError(ctx, t, err)
 	}
 
 	// An object that became Active without an Access application (for example
@@ -384,18 +387,7 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		return ctrl.Result{}, r.Status().Update(ctx, t)
 	}
 	if err := r.verifyTunnelServiceTarget(ctx, t); err != nil {
-		if errors.Is(err, errUnsafeServiceTarget) {
-			if t.Status.TunnelID != "" {
-				return ctrl.Result{}, r.terminate(ctx, t, "service target became unsafe; tunnel removed: "+err.Error())
-			}
-			if t.Status.Phase != agentopsv1alpha1.PhaseFailed || t.Status.Message != err.Error() {
-				t.Status.Phase = agentopsv1alpha1.PhaseFailed
-				t.Status.Message = err.Error()
-				return ctrl.Result{}, r.Status().Update(ctx, t)
-			}
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, fmt.Errorf("verifying Service target: %w", err)
+		return r.handleServiceTargetVerificationError(ctx, t, err)
 	}
 
 	if err := r.ensureQuotaReservation(ctx, t, t.Status.TunnelID != ""); err != nil {
@@ -1013,9 +1005,28 @@ func (r *AgentEdgeTunnelReconciler) verifyTunnelServiceTarget(ctx context.Contex
 		}
 	}
 	if target == nil {
+		if t.Status.ServiceTargetVerificationTarget != "" || t.Status.ServiceTargetVerificationAttempts != 0 {
+			t.Status.ServiceTargetVerificationTarget = ""
+			t.Status.ServiceTargetVerificationAttempts = 0
+			return r.Status().Update(ctx, t)
+		}
 		return nil
 	}
-	return r.verifyServiceTarget(ctx, t.Namespace, target)
+	targetKey := fmt.Sprintf("%s:%d", target.Name, target.Port)
+	if t.Status.ServiceTargetVerificationTarget != targetKey {
+		t.Status.ServiceTargetVerificationTarget = targetKey
+		t.Status.ServiceTargetVerificationAttempts = 0
+	}
+	if err := r.verifyServiceTarget(ctx, t.Namespace, target); err != nil {
+		return err
+	}
+	if t.Status.ServiceTargetVerificationAttempts != 0 {
+		t.Status.ServiceTargetVerificationAttempts = 0
+		if err := r.Status().Update(ctx, t); err != nil {
+			return fmt.Errorf("resetting Service target verification retries: %w", err)
+		}
+	}
+	return nil
 }
 
 // verifyServiceTarget permits only a ClusterIP Service selected by Pods in the
@@ -1097,13 +1108,13 @@ func (r *AgentEdgeTunnelReconciler) verifyServiceTarget(ctx context.Context, nam
 			}
 			pod, ok := selectedPods[ref.Name]
 			if !ok || (ref.UID != "" && ref.UID != pod.UID) {
-				return fmt.Errorf("%w: EndpointSlice %s/%s references a Pod not selected by Service %s/%s", errUnsafeServiceTarget, namespace, slice.Name, namespace, target.Name)
+				return fmt.Errorf("%w: EndpointSlice %s/%s references a Pod not yet selected by Service %s/%s", errTransientServiceTarget, namespace, slice.Name, namespace, target.Name)
 			}
 			if pod.Spec.HostNetwork {
 				return fmt.Errorf("%w: Service %s/%s selects hostNetwork Pod %s", errUnsafeServiceTarget, namespace, target.Name, pod.Name)
 			}
 			if len(endpoint.Addresses) == 0 {
-				return fmt.Errorf("%w: EndpointSlice %s/%s contains an endpoint without addresses", errUnsafeServiceTarget, namespace, slice.Name)
+				return fmt.Errorf("%w: EndpointSlice %s/%s contains an endpoint without addresses", errTransientServiceTarget, namespace, slice.Name)
 			}
 			for _, address := range endpoint.Addresses {
 				ip := net.ParseIP(address)
@@ -1111,12 +1122,51 @@ func (r *AgentEdgeTunnelReconciler) verifyServiceTarget(ctx context.Context, nam
 					return fmt.Errorf("%w: EndpointSlice %s/%s contains an invalid address %q", errUnsafeServiceTarget, namespace, slice.Name, address)
 				}
 				if _, ok := podIPs[pod.Name][ip.String()]; !ok {
-					return fmt.Errorf("%w: EndpointSlice %s/%s address %q does not belong to selected Pod %s", errUnsafeServiceTarget, namespace, slice.Name, address, pod.Name)
+					return fmt.Errorf("%w: EndpointSlice %s/%s address %q does not yet match selected Pod %s", errTransientServiceTarget, namespace, slice.Name, address, pod.Name)
 				}
 			}
 		}
 	}
 	return nil
+}
+
+// handleServiceTargetVerificationError retries rollout-related endpoint
+// mismatches for a bounded period, but still terminates a tunnel if the
+// inconsistency persists. Definitive unsafe configuration is rejected
+// immediately.
+func (r *AgentEdgeTunnelReconciler) handleServiceTargetVerificationError(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, cause error) (ctrl.Result, error) {
+	if errors.Is(cause, errTransientServiceTarget) {
+		if t.Status.ServiceTargetVerificationAttempts < serviceTargetRetryLimit {
+			t.Status.ServiceTargetVerificationAttempts++
+			t.Status.Message = fmt.Sprintf("waiting for Kubernetes Service endpoints to converge (%d/%d): %s", t.Status.ServiceTargetVerificationAttempts, serviceTargetRetryLimit, cause)
+			if t.Status.TunnelID == "" {
+				t.Status.Phase = agentopsv1alpha1.PhasePending
+			}
+			if err := r.Status().Update(ctx, t); err != nil {
+				return ctrl.Result{}, fmt.Errorf("recording Service target retry: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: serviceTargetRetryInterval}, nil
+		}
+		cause = fmt.Errorf("%w: Service endpoints remained inconsistent after %d retries: %v", errUnsafeServiceTarget, serviceTargetRetryLimit, cause)
+	}
+
+	if errors.Is(cause, errUnsafeServiceTarget) {
+		if t.Status.TunnelID != "" {
+			return ctrl.Result{}, r.terminate(ctx, t, "service target became unsafe; tunnel removed: "+cause.Error())
+		}
+		t.Status.Phase = agentopsv1alpha1.PhaseFailed
+		t.Status.Message = cause.Error()
+		return ctrl.Result{RequeueAfter: maxRequeue}, r.Status().Update(ctx, t)
+	}
+
+	verificationErr := fmt.Errorf("verifying Service target: %w", cause)
+	if t.Status.Phase == agentopsv1alpha1.PhaseActive {
+		t.Status.Message = "UNPROTECTED: unable to verify Service target: " + cause.Error()
+		if err := r.Status().Update(ctx, t); err != nil {
+			return ctrl.Result{}, errors.Join(verificationErr, fmt.Errorf("recording Service verification failure: %w", err))
+		}
+	}
+	return ctrl.Result{}, verificationErr
 }
 
 // enqueueServiceTunnels maps a Service or EndpointSlice change to tunnels that

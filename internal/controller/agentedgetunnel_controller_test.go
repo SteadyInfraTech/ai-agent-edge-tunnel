@@ -750,11 +750,6 @@ func TestRejectsUnsafeServiceTargetsBeforeProvisioning(t *testing.T) {
 			slice.Endpoints[0].TargetRef = nil
 			require.NoError(h.t, h.k8s.Update(context.Background(), slice))
 		},
-		"EndpointSlice points outside selected Pod": func(h *harness) {
-			slice := getTestEndpointSlice(h)
-			slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
-			require.NoError(h.t, h.k8s.Update(context.Background(), slice))
-		},
 		"EndpointSlice references another namespace": func(h *harness) {
 			slice := getTestEndpointSlice(h)
 			slice.Endpoints[0].TargetRef.Namespace = "kube-system"
@@ -779,6 +774,22 @@ func TestRejectsUnsafeServiceTargetsBeforeProvisioning(t *testing.T) {
 	}
 }
 
+// TestProvisioningRetriesTransientServiceEndpointMismatch ensures a tunnel
+// without a recorded Cloudflare ID remains Pending and rechecks without waiting
+// for another Kubernetes event.
+func TestProvisioningRetriesTransientServiceEndpointMismatch(t *testing.T) {
+	h := newHarness(t, nil)
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhasePending, h.get().Status.Phase)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	assert.Zero(t, h.cf.CreateTunnelCalls)
+}
+
 // TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe ensures an
 // EndpointSlice change removes an already-exposed tunnel rather than leaving
 // it routed to an arbitrary address.
@@ -794,6 +805,13 @@ func TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe(t *testing.T) {
 	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
 	require.NoError(t, h.k8s.Update(context.Background(), slice))
 
+	for i := int32(0); i < serviceTargetRetryLimit; i++ {
+		res, reconcileErr := h.reconcile()
+		require.NoError(t, reconcileErr)
+		assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+		assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+		assert.Len(t, h.cf.Tunnels, 1)
+	}
 	_, err = h.reconcile()
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
@@ -802,6 +820,35 @@ func TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe(t *testing.T) {
 	assert.Empty(t, h.cf.Tunnels)
 	assert.Empty(t, h.cf.AccessApps)
 	h.assertConnectorGone()
+}
+
+// TestActiveTunnelSurvivesTransientEndpointSliceConvergence ensures a
+// rollout-related Pod/EndpointSlice mismatch is retried and recovers in place.
+func TestActiveTunnelSurvivesTransientEndpointSliceConvergence(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Equal(t, int32(1), h.get().Status.ServiceTargetVerificationAttempts)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+
+	slice = getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"10.244.0.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Zero(t, h.get().Status.ServiceTargetVerificationAttempts)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
 }
 
 func getTestService(h *harness) *corev1.Service {
