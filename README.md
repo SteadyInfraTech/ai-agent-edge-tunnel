@@ -153,10 +153,14 @@ of `system:masters` or groups listed in the optional comma-separated
 `EDGE_QUOTA_ADMIN_GROUPS` ConfigMap key can manage quota objects. If the key is
 unset, only `system:masters` is authorized. If the ConfigMap is missing,
 `system:masters` retains break-glass access while all other groups are denied.
-The policy does not match the `status` subresource, so the operator can continue
-updating reservations. Changing `spec.limit` is an administrative capacity
-decision; do not grant quota write permissions to tenant roles even with this
-policy installed.
+The policy also protects the `status` subresource: only the operator's
+`edge-tunnel-controller-manager` ServiceAccount and `system:masters` can update
+the reservation ledger. Configured quota-admin groups can manage `spec.limit`
+but cannot forge or remove reservations. If the ConfigMap is missing, the
+operator ServiceAccount and `system:masters` retain their required recovery
+paths, while all other identities are denied. Changing `spec.limit` is an
+administrative capacity decision; do not grant quota write permissions to
+tenant roles even with this policy installed.
 
 ## Project Structure
 
