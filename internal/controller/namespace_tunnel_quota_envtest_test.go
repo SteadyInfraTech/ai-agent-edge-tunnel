@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
@@ -194,6 +195,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
 	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme))
 	k8s, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
@@ -253,6 +255,28 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 
 	quotaNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "quota-policy"}}
 	require.NoError(t, k8s.Create(ctx, quotaNamespace))
+	// Give both test identities real API permissions so the assertions below
+	// exercise admission policy, not an RBAC denial.
+	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{"edge.steadyinfra.com"},
+			Resources: []string{"namespacetunnelquotas", "namespacetunnelquotas/status"},
+			Verbs:     []string{"get", "list", "create", "update", "patch", "delete"},
+		}},
+	}))
+	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "quota-policy-test",
+		},
+		Subjects: []rbacv1.Subject{
+			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "tenant-users"},
+			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "quota-admins"},
+		},
+	}))
 	quotaObject := func() *agentopsv1alpha1.NamespaceTunnelQuota {
 		return &agentopsv1alpha1.NamespaceTunnelQuota{
 			ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "quota-policy"},
