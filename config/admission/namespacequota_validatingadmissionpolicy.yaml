@@ -16,7 +16,7 @@ spec:
       scope: Namespaced
   validations:
   - expression: >-
-      request.subResource == 'status'
+      has(request.subResource) && request.subResource == 'status'
       ? (request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
          request.userInfo.groups.exists(group, group == 'system:masters'))
       : request.userInfo.groups.exists(group,
