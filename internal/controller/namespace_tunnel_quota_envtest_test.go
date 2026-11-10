@@ -10,8 +10,8 @@ import (
 	"time"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -203,9 +203,9 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	params := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
-			"CLOUDFLARE_ZONE_ID":   "zone-123",
-			"CLOUDFLARE_ZONE_NAME": "example.com",
-			"EDGE_BASE_DOMAIN":     "agents.example.com",
+			"CLOUDFLARE_ZONE_ID":     "zone-123",
+			"CLOUDFLARE_ZONE_NAME":   "example.com",
+			"EDGE_BASE_DOMAIN":       "agents.example.com",
 			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
 		},
 	}
