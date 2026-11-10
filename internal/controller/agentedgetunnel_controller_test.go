@@ -787,12 +787,14 @@ func TestProvisioningRetriesTransientServiceEndpointMismatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhasePending, h.get().Status.Phase)
 	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	assert.NotNil(t, h.get().Status.ServiceTargetVerificationSince)
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
-// TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe ensures an
-// EndpointSlice change removes an already-exposed tunnel rather than leaving
-// it routed to an arbitrary address.
+// TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe ensures an
+// EndpointSlice mismatch is tolerated for a time-bounded grace period, then
+// removes an already-exposed tunnel if the mismatch persists. Immediate
+// reconciles model status-update/watch events and must not consume that period.
 // TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch
 // ensures provisioning does not destroy an already-created tunnel during a
 // short Pod/EndpointSlice rollout race.
@@ -823,11 +825,12 @@ func TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch(t *t
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
 	assert.Zero(t, h.get().Status.ServiceTargetVerificationAttempts)
+	assert.Nil(t, h.get().Status.ServiceTargetVerificationSince)
 	assert.Equal(t, active.Status.TunnelID, h.get().Status.TunnelID)
 	assert.Len(t, h.cf.Tunnels, 1)
 }
 
-func TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe(t *testing.T) {
+func TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
 	require.NoError(t, err)
@@ -839,13 +842,28 @@ func TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe(t *testing.T) {
 	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
 	require.NoError(t, h.k8s.Update(context.Background(), slice))
 
-	for i := int32(0); i < serviceTargetRetryLimit; i++ {
-		res, reconcileErr := h.reconcile()
-		require.NoError(t, reconcileErr)
-		assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	startedAt := h.get().Status.ServiceTargetVerificationSince
+	require.NotNil(t, startedAt)
+	require.Equal(t, h.now, startedAt.Time)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+
+	// The status update above would enqueue another reconcile through the
+	// controller's primary watch. Repeated immediate reconciles must not
+	// consume the grace period or terminate a healthy tunnel during a rollout.
+	for i := 0; i < 8; i++ {
+		res, err = h.reconcile()
+		require.NoError(t, err)
 		assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+		assert.Equal(t, startedAt, h.get().Status.ServiceTargetVerificationSince)
+		assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
 		assert.Len(t, h.cf.Tunnels, 1)
+		assert.NotEmpty(t, h.cf.DNSRecords)
 	}
+
+	h.now = h.now.Add(serviceTargetGracePeriod + time.Second)
 	_, err = h.reconcile()
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
@@ -881,6 +899,7 @@ func TestActiveTunnelSurvivesTransientEndpointSliceConvergence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
 	assert.Zero(t, h.get().Status.ServiceTargetVerificationAttempts)
+	assert.Nil(t, h.get().Status.ServiceTargetVerificationSince)
 	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
 	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
 }
