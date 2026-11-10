@@ -55,7 +55,7 @@ jobs:
           kubectl kustomize config/default > /tmp/default.yaml
           grep -q '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml
           test "$(grep -c '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml)" -eq 3
-          test "$(grep -c '^kind: ValidatingAdmissionPolicyBinding$' /tmp/default.yaml)" -eq 2
+          test "$(grep -c '^kind: ValidatingAdmissionPolicyBinding$' /tmp/default.yaml)" -eq 3
           grep -q '^  name: edge-tunnel-quota-admin-policy$' /tmp/default.yaml
           grep -q '^  name: edge-tunnel-quota-status-policy$' /tmp/default.yaml
 
