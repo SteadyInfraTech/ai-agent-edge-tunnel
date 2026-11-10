@@ -51,7 +51,918 @@ jobs:
         run: go build -o bin/manager ./cmd
 
       - name: Render Kubernetes manifests
-        run: kubectl kustomize config/default > /dev/null
+        run: |
+          kubectl kustomize config/default > /tmp/default.yaml
+          grep -q '^kind: ValidatingAdmissionPolicy
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+          grep -q '^kind: ValidatingAdmissionPolicy
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/default.yaml
+          grep -q '^kind: ValidatingAdmissionPolicyBinding
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/default.yaml
+
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/namespaced.yaml
+          grep -q '^kind: ValidatingAdmissionPolicyBinding
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/default.yaml
+          grep -q '^kind: ValidatingAdmissionPolicyBinding
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/default.yaml
+
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/namespaced.yaml
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/default.yaml
+          grep -q '^kind: ValidatingAdmissionPolicyBinding
+      - name: Namespaced overlay grants nothing cluster-wide
+        run: |
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
+          if grep -E '^kind: ClusterRole(Binding)?$' /tmp/namespaced.yaml; then
+            echo 'the namespaced overlay must not contain a ClusterRole or ClusterRoleBinding'
+            exit 1
+          fi
+          grep -q -- '--watch-namespaces=agents' /tmp/namespaced.yaml
+
+      - name: Build container image
+        run: docker build -t ai-agent-edge-tunnel:ci .
+
+  live-test:
+    name: Live Cloudflare API test
+    runs-on: ubuntu-latest
+    # Credentials must never reach code from a pull request, including one from
+    # a branch of this repository, so this job runs only after a merge to main
+    # (or when started by hand), never on pull_request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Credentials belong to this environment. In the repository settings, move
+    # the Cloudflare secrets into it and restrict its deployment branches to
+    # main, so no other ref can read them.
+    environment: cloudflare-live
+    # One live run at a time, queued rather than cancelled, so runs do not
+    # contend for the same Cloudflare account. Test resources are also named
+    # uniquely per run.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    # Job-level env so the step's `if:` can see it (a step's own `env:` is not
+    # visible to its own `if:`). Only this job receives the credentials.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check live Cloudflare credentials
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - name: Run Live Cloudflare API Test
+        run: go test -v -count=1 ./internal/cloudflare/ -run TestLiveCloudflareTunnel
+
+  kind-live-e2e:
+    name: Live end-to-end on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same rules as live-test: credentials only after a merge to main (or by hand), never for a
+    # pull request, and only through the cloudflare-live environment.
+    # Also needs the repository variable LIVE_E2E_ENABLED=true (Settings > Secrets and variables >
+    # Actions > Variables). It creates a Cloudflare Access application, so the account must have Zero
+    # Trust enabled (Cloudflare asks for a payment method even for the free plan) and the API token
+    # must be allowed to edit Access applications. Without the variable the job is skipped, not red.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.LIVE_E2E_ENABLED == 'true'
+    environment: cloudflare-live
+    # Shares the lock with live-test so only one job at a time uses the Cloudflare account.
+    concurrency:
+      group: cloudflare-live-test
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TEST_HOSTNAME: ${{ secrets.CLOUDFLARE_TEST_HOSTNAME }}
+    steps:
+      - name: Check credentials are available
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_TEST_HOSTNAME; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set in the cloudflare-live environment"; exit 1; fi
+          done
+      - uses: actions/checkout@v4
+        with:
+          path: ai-agent-edge-tunnel
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-operator
+          path: agentops-operator
+      - uses: actions/checkout@v4
+        with:
+          repository: SteadyInfraTech/agentops-client
+          path: agentops-client
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentops-client/go.mod
+          cache-dependency-path: agentops-client/go.sum
+      - name: Install kind
+        run: |
+          curl -sSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum -c -
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+      - name: Run the live end-to-end test
+        working-directory: agentops-client
+        env:
+          LIVE: "1"
+          OPERATOR_DIR: ${{ github.workspace }}/agentops-operator
+          EDGE_DIR: ${{ github.workspace }}/ai-agent-edge-tunnel
+        run: ./hack/kind-smoke.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get agentsessions,agentedgetunnels -A || true
+          kubectl -n edge-tunnel-system logs deploy/edge-tunnel-controller-manager --tail=200 || true
+ /tmp/default.yaml
 
       - name: Namespaced overlay grants nothing cluster-wide
         run: |
