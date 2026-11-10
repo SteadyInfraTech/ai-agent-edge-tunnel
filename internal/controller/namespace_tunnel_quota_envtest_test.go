@@ -330,6 +330,9 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, quotaAdminClient.Update(ctx, quota))
 	require.NoError(t, quotaAdminClient.Delete(ctx, quota))
 
+	statusRecoveryQuota := quotaObject()
+	require.NoError(t, quotaAdminClient.Create(ctx, statusRecoveryQuota))
+
 	// Missing policy parameters deny quota spec operations for every identity,
 	// including cluster administrators. Restore the ConfigMap before changing
 	// quotas; the separate status policy remains available for recovery.
@@ -351,6 +354,9 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.True(t, missingParamsDenied, "quota spec changes must fail closed for all users when policy parameters are missing")
 	require.Error(t, tenantClient.Create(ctx, quotaObject()), "tenant groups must remain denied when policy parameters are missing")
+	statusRecoveryQuota.Status.Reservations = []agentopsv1alpha1.TunnelReservation{{Name: "status-recovery", UID: "status-recovery-uid"}}
+	require.NoError(t, k8s.Status().Update(ctx, statusRecoveryQuota), "the independent status policy must allow cluster-admin recovery without the ConfigMap")
+	require.Error(t, k8s.Delete(ctx, statusRecoveryQuota), "the spec policy must continue blocking quota deletion without the ConfigMap")
 	params = &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
@@ -362,6 +368,8 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, params))
+	require.NoError(t, quotaAdminClient.Get(ctx, client.ObjectKeyFromObject(statusRecoveryQuota), statusRecoveryQuota))
+	require.NoError(t, quotaAdminClient.Delete(ctx, statusRecoveryQuota), "quota spec management should resume after restoring the ConfigMap")
 
 	// The API server may need a short interval to observe the policy and binding.
 	// Probe enforcement itself instead of depending on status controllers that
