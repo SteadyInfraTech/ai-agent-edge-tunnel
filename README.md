@@ -17,6 +17,14 @@ spec:
     allowedEmails: [devops@company.com]             # or: allowPublic: true
 ```
 
+For connector-backed tunnels, the Service must have a ClusterIP, a non-empty Pod
+selector, and the requested TCP port. Headless and `ExternalName` Services,
+selectorless Services, and endpoints that do not resolve to matching Pods in
+the same namespace are rejected. Pods using host networking are not accepted
+as Service endpoints. Service and EndpointSlice changes are watched and
+revalidated; an unsafe change terminates the tunnel and removes its Cloudflare
+resources.
+
 For each object the operator creates, in this order:
 
 1. a Cloudflare **Tunnel** (its ID and credentials are stored immediately, so retries never leak tunnels);
