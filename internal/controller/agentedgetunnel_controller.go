@@ -254,6 +254,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 			// in real mode), so cleanup proceeds using recorded IDs only. A
 			// matching tunnel with uncertain ownership returns an error above
 			// and keeps the finalizer in place.
+			log.FromContext(ctx).Info("No eligible Cloudflare tunnel found during deletion recovery; continuing with recorded IDs only", "tunnelName", tunnelName(t))
 		}
 	}
 	// On failure the finalizer stays, so the object remains visible and the
