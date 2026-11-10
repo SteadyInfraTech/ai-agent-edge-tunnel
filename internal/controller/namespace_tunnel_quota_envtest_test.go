@@ -284,7 +284,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		}
 	}
 	quotaCreateDenied := false
-	deadline = time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		attempt := quotaObject()
 		createErr := tenantClient.Create(ctx, attempt)
@@ -391,7 +391,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	// normalize it identically rather than rejecting otherwise-valid tenants.
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
 	require.NoError(t, k8s.Update(ctx, params))
-	deadline := time.Now().Add(15 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		probe := newTunnel("restricted", fmt.Sprintf("leading-dot-zone-probe-%d", time.Now().UnixNano()), "zone-123", false)
 		err := k8s.Create(ctx, probe)
