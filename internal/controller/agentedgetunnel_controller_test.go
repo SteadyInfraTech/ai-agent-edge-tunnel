@@ -1061,6 +1061,11 @@ func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
 			app.Emails = []string{"other@example.com"}
 			h.cf.AccessApps[h.get().Status.AccessAppID] = app
 		},
+		"public path override added": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.HasPublicOverride = true
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

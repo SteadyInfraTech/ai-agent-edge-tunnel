@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/cloudflare/cloudflare-go"
@@ -314,21 +316,27 @@ func (c *RealCloudflareClient) FindTunnels(ctx context.Context, name string) ([]
 	}
 }
 
-// VerifyAccessPolicy verifies the recorded application and its complete policy surface.
+// VerifyAccessPolicy verifies the recorded application, destinations, and complete policy surface.
 // It fails closed on extra policies, non-email selectors, exclusions, requirements,
 // or any change to the allowlist. API errors are returned separately from drift.
 func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID, appID, name, domain string, allowedEmails []string) (bool, error) {
-	rc := cloudflare.AccountIdentifier(accountID)
-	app, err := c.api.GetAccessApplication(ctx, rc, appID)
+	app, err := c.getAccessApplicationConfig(ctx, accountID, appID)
 	if err != nil {
-		if isNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("getting Access application %s: %w", appID, err)
+		return false, err
+	}
+	if app == nil {
+		return false, nil
 	}
 	if app.ID != appID || app.Name != name || app.Domain != domain {
 		return false, nil
 	}
+	if app.Type != "" && app.Type != string(cloudflare.SelfHosted) {
+		return false, nil
+	}
+	if app.OptionsPreflightBypass || !validAccessDestinations(app.Destinations, domain) {
+		return false, nil
+	}
+	rc := cloudflare.AccountIdentifier(accountID)
 	policies, _, err := c.api.ListAccessPolicies(ctx, rc, cloudflare.ListAccessPoliciesParams{ApplicationID: appID})
 	if err != nil {
 		return false, fmt.Errorf("listing policies for Access application %s: %w", appID, err)
@@ -379,6 +387,116 @@ func (c *RealCloudflareClient) VerifyAccessPolicy(ctx context.Context, accountID
 		got[email] = struct{}{}
 	}
 	return len(got) == len(want), nil
+}
+
+// accessApplicationConfig contains the security-relevant fields returned by
+// Cloudflare's Access application endpoint. The SDK version used here does not
+// model destination overrides, so decode this response directly to avoid
+// silently discarding fields that can bypass Access authentication.
+type accessApplicationConfig struct {
+	ID                     string            `json:"id"`
+	Name                   string            `json:"name"`
+	Domain                 string            `json:"domain"`
+	Type                   string            `json:"type"`
+	OptionsPreflightBypass bool              `json:"options_preflight_bypass"`
+	Destinations           []json.RawMessage `json:"destinations"`
+}
+
+func (c *RealCloudflareClient) getAccessApplicationConfig(ctx context.Context, accountID, appID string) (*accessApplicationConfig, error) {
+	endpoint := strings.TrimRight(c.api.BaseURL, "/") + "/accounts/" + url.PathEscape(accountID) + "/access/apps/" + url.PathEscape(appID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request for Access application %s: %w", appID, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIToken)
+	req.Header.Set("User-Agent", c.api.UserAgent)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("getting Access application %s: %w", appID, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading Access application %s response: %w", appID, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("getting Access application %s: Cloudflare API returned HTTP %d: %s", appID, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var envelope struct {
+		Success bool            `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("decoding Access application %s response: %w", appID, err)
+	}
+	if !envelope.Success {
+		messages := make([]string, 0, len(envelope.Errors))
+		for _, apiErr := range envelope.Errors {
+			if apiErr.Message != "" {
+				messages = append(messages, apiErr.Message)
+			}
+		}
+		return nil, fmt.Errorf("getting Access application %s: Cloudflare API reported failure: %s", appID, strings.Join(messages, "; "))
+	}
+	var app accessApplicationConfig
+	if len(envelope.Result) == 0 || string(envelope.Result) == "null" {
+		return nil, fmt.Errorf("getting Access application %s: Cloudflare API returned no application", appID)
+	}
+	if err := json.Unmarshal(envelope.Result, &app); err != nil {
+		return nil, fmt.Errorf("decoding Access application %s configuration: %w", appID, err)
+	}
+	return &app, nil
+}
+
+// validAccessDestinations accepts only the exact public hostname protected by
+// this tunnel, with no destination overrides. Unknown destination fields are
+// rejected so a future Cloudflare bypass feature cannot be silently ignored.
+func validAccessDestinations(destinations []json.RawMessage, domain string) bool {
+	// Older self-hosted applications expose only the top-level domain field.
+	if len(destinations) == 0 {
+		return true
+	}
+	if len(destinations) != 1 {
+		return false
+	}
+	var destination map[string]json.RawMessage
+	if err := json.Unmarshal(destinations[0], &destination); err != nil || len(destination) == 0 {
+		return false
+	}
+	for key := range destination {
+		if key != "type" && key != "uri" && key != "overrides" {
+			return false
+		}
+	}
+	var typ, uri string
+	if raw, ok := destination["type"]; ok {
+		if err := json.Unmarshal(raw, &typ); err != nil {
+			return false
+		}
+	}
+	if typ != "" && typ != "public" {
+		return false
+	}
+	if raw, ok := destination["uri"]; !ok || json.Unmarshal(raw, &uri) != nil || uri != domain {
+		return false
+	}
+	if raw, ok := destination["overrides"]; ok && string(raw) != "null" {
+		var overrides []json.RawMessage
+		if err := json.Unmarshal(raw, &overrides); err != nil || len(overrides) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // FindAccessApplications lists the Access applications whose name and domain

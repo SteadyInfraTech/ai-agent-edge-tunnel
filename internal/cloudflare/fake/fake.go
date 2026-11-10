@@ -37,9 +37,10 @@ type Client struct {
 
 // AccessApp is a recorded Access application.
 type AccessApp struct {
-	Name   string
-	Domain string
-	Emails []string
+	Name              string
+	Domain            string
+	Emails            []string
+	HasPublicOverride bool
 }
 
 // New returns an empty Client.
@@ -163,9 +164,9 @@ func (c *Client) VerifyAccessPolicy(_ context.Context, _, appID, name, domain st
 		return false, c.FindAccessErr
 	}
 	app, ok := c.AccessApps[appID]
-	if !ok || app.Name != name || app.Domain != domain {
+	if !ok || app.Name != name || app.Domain != domain || app.HasPublicOverride {
 		return false, nil
-	}
+}
 	want := make(map[string]struct{}, len(allowedEmails))
 	for _, email := range allowedEmails {
 		want[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
