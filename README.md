@@ -147,10 +147,14 @@ cleanup succeeds. A failed cleanup therefore retains both the finalizer and
 the quota slot for a later retry.
 
 The operator's RBAC grants it read access to quota specs and write access only
-to quota status. Restrict creation, updates, and deletion of `NamespaceTunnelQuota`
-objects to trusted namespace administrators: changing `spec.limit` is an
-administrative capacity decision. The namespaced installation grants these
-permissions only inside each configured managed namespace.
+to quota status. The default and namespaced installs also apply a fail-closed
+ValidatingAdmissionPolicy to quota `CREATE`, `UPDATE`, and `DELETE`: only members
+of `system:masters` or groups listed in the optional comma-separated
+`EDGE_QUOTA_ADMIN_GROUPS` ConfigMap key can manage quota objects. If the key is
+unset, only `system:masters` is authorized. The policy does not match the
+`status` subresource, so the operator can continue updating reservations.
+Changing `spec.limit` is an administrative capacity decision; do not grant
+quota write permissions to tenant roles even with this policy installed.
 
 ## Project Structure
 
@@ -210,7 +214,7 @@ kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
   --from-literal=CLOUDFLARE_ZONE_ID=<zone-id> \
   --from-literal=CLOUDFLARE_ZONE_NAME=example.com \
   --from-literal=CONNECTOR_IMAGE=<pinned cloudflared image> \
-  --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public
+  --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public \\\n  --from-literal=EDGE_QUOTA_ADMIN_GROUPS=platform-admins
 make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
 make deploy IMG=<your-registry>/ai-agent-edge-tunnel:<tag>        # needs the kustomize CLI
 kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml
