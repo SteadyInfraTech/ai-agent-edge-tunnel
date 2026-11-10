@@ -1,3 +1,5 @@
 resources:
 - validatingadmissionpolicy.yaml
 - validatingadmissionpolicybinding.yaml
+- namespacequota_validatingadmissionpolicy.yaml
+- namespacequota_validatingadmissionpolicybinding.yaml
