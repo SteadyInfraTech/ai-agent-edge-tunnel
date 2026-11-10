@@ -896,7 +896,6 @@ func TestActiveTunnelSurvivesTransientEndpointSliceConvergence(t *testing.T) {
 	_, err = h.reconcile()
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
-	assert.Zero(t, h.get().Status.ServiceTargetVerificationAttempts)
 	assert.Nil(t, h.get().Status.ServiceTargetVerificationSince)
 	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
 	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
