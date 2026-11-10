@@ -354,8 +354,8 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.True(t, createDenied, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
 
-	// The missing-parameter denial also blocks cleanup. Restore the ConfigMap
-	// with an invalid zone ID to prove the narrowly-scoped finalizer exception.
+	// Restore the ConfigMap with an invalid zone ID. Admission remains
+	// fail-closed for finalizer removal until the configuration is valid again.
 	restoredParams := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
@@ -366,21 +366,42 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, restoredParams))
+	var current agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &current))
+	current.Finalizers = nil
+	var finalizerRemovalDenied bool
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		removeErr := k8s.Update(ctx, &current)
+		if apierrors.IsForbidden(removeErr) || apierrors.IsInvalid(removeErr) {
+			finalizerRemovalDenied = true
+			break
+		}
+		if removeErr != nil {
+			t.Fatalf("unexpected error while checking invalid-parameter cleanup behavior: %v", removeErr)
+		}
+		t.Fatalf("finalizer removal unexpectedly succeeded with an invalid zone ID")
+	}
+	require.True(t, finalizerRemovalDenied, "finalizer removal must remain blocked while admission parameters are invalid")
+
+	// Repair the parameter ConfigMap, then the terminating resource can finish.
+	restoredParams.Data["CLOUDFLARE_ZONE_ID"] = "zone-123"
+	require.NoError(t, k8s.Update(ctx, restoredParams))
 	finalizerRemoved := false
 	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		var current agentopsv1alpha1.AgentEdgeTunnel
-		require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &current))
-		current.Finalizers = nil
-		removeErr := k8s.Update(ctx, &current)
+		var latest agentopsv1alpha1.AgentEdgeTunnel
+		require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &latest))
+		latest.Finalizers = nil
+		removeErr := k8s.Update(ctx, &latest)
 		if removeErr == nil {
 			finalizerRemoved = true
 			break
 		}
-		if !isMissingParameterDenial(removeErr) {
-			t.Fatalf("unexpected error while waiting for restored parameters: %v", removeErr)
+		if !apierrors.IsForbidden(removeErr) && !apierrors.IsInvalid(removeErr) {
+			t.Fatalf("unexpected error while waiting for valid parameters: %v", removeErr)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	require.True(t, finalizerRemoved, "the terminating object may remove only its operator finalizer when parameters exist but are invalid")
+	require.True(t, finalizerRemoved, "finalizer removal should succeed after restoring valid admission parameters")
 }
