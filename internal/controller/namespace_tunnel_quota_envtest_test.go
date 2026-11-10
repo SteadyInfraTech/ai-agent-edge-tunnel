@@ -244,13 +244,13 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	// Namespace quota limits are an administrative capacity decision. A
 	// tenant with broad custom-resource write access must not be able to
 	// create, raise, or remove its own quota. Configured admin groups can.
-	tenantUser, err := testEnv.AddUser("quota-tenant", []string{"tenant-users"}, cfg)
+	tenantUser, err := testEnv.AddUser(envtest.User{Name: "quota-tenant", Groups: []string{"tenant-users"}}, cfg)
 	require.NoError(t, err)
-	tenantClient, err := client.New(tenantUser.Config, client.Options{Scheme: scheme})
+	tenantClient, err := client.New(tenantUser.Config(), client.Options{Scheme: scheme})
 	require.NoError(t, err)
-	quotaAdmin, err := testEnv.AddUser("quota-admin", []string{"quota-admins"}, cfg)
+	quotaAdmin, err := testEnv.AddUser(envtest.User{Name: "quota-admin", Groups: []string{"quota-admins"}}, cfg)
 	require.NoError(t, err)
-	quotaAdminClient, err := client.New(quotaAdmin.Config, client.Options{Scheme: scheme})
+	quotaAdminClient, err := client.New(quotaAdmin.Config(), client.Options{Scheme: scheme})
 	require.NoError(t, err)
 
 	quotaNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "quota-policy"}}
@@ -284,7 +284,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		}
 	}
 	quotaCreateDenied := false
-	deadline := time.Now().Add(15 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		attempt := quotaObject()
 		createErr := tenantClient.Create(ctx, attempt)
