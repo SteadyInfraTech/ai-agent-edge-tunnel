@@ -27,10 +27,16 @@ spec:
       object.metadata.labels != oldObject.metadata.labels ||
       object.metadata.annotations != oldObject.metadata.annotations ||
       object.metadata.ownerReferences != oldObject.metadata.ownerReferences ||
-      !((!has(object.metadata.finalizers) ||
-         object.metadata.finalizers.size() < oldObject.metadata.finalizers.size()) &&
+      object.status != oldObject.status ||
+      !(
+        oldObject.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup') &&
         (!has(object.metadata.finalizers) ||
-         object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(oldF, oldF == f))))
+         !object.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup')) &&
+        oldObject.metadata.finalizers.size() ==
+          (has(object.metadata.finalizers) ? object.metadata.finalizers.size() : 0) + 1 &&
+        (!has(object.metadata.finalizers) ||
+         object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(oldF, oldF == f)))
+      )
   validations:
   - expression: >-
       params.data['CLOUDFLARE_ZONE_ID'] != '' &&
