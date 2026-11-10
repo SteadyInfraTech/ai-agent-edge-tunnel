@@ -793,6 +793,40 @@ func TestProvisioningRetriesTransientServiceEndpointMismatch(t *testing.T) {
 // TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe ensures an
 // EndpointSlice change removes an already-exposed tunnel rather than leaving
 // it routed to an arbitrary address.
+// TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch
+// ensures provisioning does not destroy an already-created tunnel during a
+// short Pod/EndpointSlice rollout race.
+func TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	active.Status.Phase = agentopsv1alpha1.PhasePending
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &active))
+
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhasePending, h.get().Status.Phase)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	assert.Equal(t, active.Status.TunnelID, h.get().Status.TunnelID)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
+
+	slice = getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"10.244.0.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Zero(t, h.get().Status.ServiceTargetVerificationAttempts)
+	assert.Equal(t, active.Status.TunnelID, h.get().Status.TunnelID)
+	assert.Len(t, h.cf.Tunnels, 1)
+}
+
 func TestActiveTunnelTerminatesWhenServiceEndpointBecomesUnsafe(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
