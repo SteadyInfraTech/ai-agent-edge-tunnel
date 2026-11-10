@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -237,18 +238,27 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		}
 	}
 
-	policyEnforced := false
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		probe := newTunnel("restricted", fmt.Sprintf("wrong-zone-probe-%d", time.Now().UnixNano()), "other-zone", false)
-		if err := k8s.Create(ctx, probe); err != nil {
-			policyEnforced = true
-			break
-		}
-		require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before policy activation")
-		time.Sleep(100 * time.Millisecond)
+	zonePolicyMessage := "spec.cloudflare.zoneID must match the configured Cloudflare zone for EDGE_BASE_DOMAIN"
+	isZonePolicyDenial := func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), zonePolicyMessage)
 	}
-	require.True(t, policyEnforced, "the API server should enforce the tenant admission policy")
+	probePolicyUntilDenied := func(zoneID, label string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			probe := newTunnel("restricted", fmt.Sprintf("%s-%d", label, time.Now().UnixNano()), zoneID, false)
+			err := k8s.Create(ctx, probe)
+			if isZonePolicyDenial(err) {
+				return
+			}
+			if err == nil {
+				require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before policy activation")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for the expected admission denial: %s", zonePolicyMessage)
+	}
+	probePolicyUntilDenied("other-zone", "wrong-zone-probe")
 
 	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "valid-protected", "zone-123", false)))
 	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "wrong-zone", "other-zone", false)),
@@ -258,9 +268,32 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Create(ctx, newTunnel("allowed-public", "public-allowed", "zone-123", true)),
 		"allowPublic must be accepted in an exactly allowlisted namespace")
 
-	// The base-domain/zone-name relationship is part of the same trusted
-	// configuration tuple; a malformed tuple must fail closed for every tenant.
+	// The operator accepts one leading dot on the zone name; admission must
+	// normalize it identically rather than rejecting otherwise-valid tenants.
+	params.Data["CLOUDFLARE_ZONE_NAME"] = ".example.com"
+	require.NoError(t, k8s.Update(ctx, params))
+	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "leading-dot-zone-name", "zone-123", false)))
+	params.Data["CLOUDFLARE_ZONE_NAME"] = "example.com"
+
+	// A malformed base-domain/zone-name tuple must fail closed. Poll for the
+	// specific policy denial because the API server may cache the old params briefly.
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.other.example"
 	require.NoError(t, k8s.Update(ctx, params))
-	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "wrong-base-domain", "zone-123", false)))
+	probePolicyUntilDenied("zone-123", "wrong-base-domain-probe")
+
+	// A terminating object must be able to drop its finalizer even if the
+	// parameter ConfigMap disappears; ordinary CREATE requests remain denied.
+	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
+	require.NoError(t, k8s.Update(ctx, params))
+	terminating := newTunnel("restricted", "finalizer-cleanup", "zone-123", false)
+	terminating.Finalizers = []string{"edge.steadyinfra.com/cleanup"}
+	require.NoError(t, k8s.Create(ctx, terminating))
+	require.NoError(t, k8s.Delete(ctx, terminating))
+	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
+	require.NotNil(t, terminating.DeletionTimestamp)
+	require.NoError(t, k8s.Delete(ctx, params))
+	terminating.Finalizers = nil
+	require.NoError(t, k8s.Update(ctx, terminating), "finalizer removal must bypass invalid or missing policy parameters")
+	missingParamsErr := k8s.Create(ctx, newTunnel("restricted", "missing-policy-params", "zone-123", false))
+	require.Error(t, missingParamsErr, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
 }
