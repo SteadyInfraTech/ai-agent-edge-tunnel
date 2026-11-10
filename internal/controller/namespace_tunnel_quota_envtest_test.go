@@ -10,11 +10,13 @@ import (
 	"time"
 
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/yaml"
 
 	"github.com/stretchr/testify/require"
 )
@@ -168,4 +170,95 @@ func TestNamespaceQuotaEnvtest(t *testing.T) {
 	require.NoError(t, reconciler.ensureQuotaReservation(ctx, existing, true), "existing provisioned tunnels are grandfathered")
 	newTunnel := createTunnel("quota-lower", "new-after-lowering")
 	require.ErrorIs(t, reconciler.ensureQuotaReservation(ctx, newTunnel, false), errQuotaExhausted)
+}
+
+
+// TestTenantAdmissionPolicyEnvtest exercises the checked-in admission policy
+// against a real API server, including zone pinning and the exact public namespace allowlist.
+func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("envtest assets are installed only by the dedicated envtest workflow")
+	}
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join("..", "..", "config", "crd", "bases")},
+	}
+	cfg, err := testEnv.Start()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, testEnv.Stop())
+	})
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme))
+	k8s, err := client.New(cfg, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	for _, name := range []string{"edge-tunnel-system", "allowed-public", "restricted"} {
+		require.NoError(t, k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}))
+	}
+	params := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
+		Data: map[string]string{
+			"CLOUDFLARE_ZONE_ID":     "zone-123",
+			"CLOUDFLARE_ZONE_NAME":   "example.com",
+			"EDGE_BASE_DOMAIN":       "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
+		},
+	}
+	require.NoError(t, k8s.Create(ctx, params))
+
+	policyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "validatingadmissionpolicy.yaml"))
+	require.NoError(t, err)
+	var policy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.Unmarshal(policyYAML, &policy))
+	require.NoError(t, k8s.Create(ctx, &policy))
+
+	bindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "validatingadmissionpolicybinding.yaml"))
+	require.NoError(t, err)
+	var binding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	require.NoError(t, yaml.Unmarshal(bindingYAML, &binding))
+	require.NoError(t, k8s.Create(ctx, &binding))
+
+	// Wait until the API server has compiled and accepted the policy before
+	// asserting admission decisions; otherwise the first create can race policy activation.
+	require.Eventually(t, func() bool {
+		var current admissionregistrationv1.ValidatingAdmissionPolicy
+		if err := k8s.Get(ctx, client.ObjectKey{Name: policy.Name}, &current); err != nil {
+			return false
+		}
+		for _, condition := range current.Status.Conditions {
+			if condition.Type == "Accepted" && condition.Status == metav1.ConditionTrue {
+				return true
+			}
+		}
+		return false
+	}, 15*time.Second, 100*time.Millisecond, "the API server should accept the tenant admission policy")
+
+	newTunnel := func(namespace, name, zoneID string, allowPublic bool) *agentopsv1alpha1.AgentEdgeTunnel {
+		return &agentopsv1alpha1.AgentEdgeTunnel{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{
+				Cloudflare: agentopsv1alpha1.CloudflareConfig{ZoneID: zoneID, Subdomain: name},
+				Security:   agentopsv1alpha1.SecurityConfig{AllowPublic: allowPublic},
+			},
+		}
+	}
+
+	require.NoError(t, k8s.Create(ctx, newTunnel("restricted", "valid-protected", "zone-123", false)))
+	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "wrong-zone", "other-zone", false)),
+		"a tenant must not select a different Cloudflare zone")
+	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "public-denied", "zone-123", true)),
+		"allowPublic must be denied outside the configured namespace allowlist")
+	require.NoError(t, k8s.Create(ctx, newTunnel("allowed-public", "public-allowed", "zone-123", true)),
+		"allowPublic must be accepted in an exactly allowlisted namespace")
+
+	// The base-domain/zone-name relationship is part of the same trusted
+	// configuration tuple; a malformed tuple must fail closed for every tenant.
+	params.Data["EDGE_BASE_DOMAIN"] = "agents.other.example"
+	require.NoError(t, k8s.Update(ctx, params))
+	require.Error(t, k8s.Create(ctx, newTunnel("restricted", "wrong-base-domain", "zone-123", false)))
 }
