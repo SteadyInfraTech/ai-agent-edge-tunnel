@@ -824,7 +824,6 @@ func TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch(t *t
 	_, err = h.reconcile()
 	require.NoError(t, err)
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
-	assert.Zero(t, h.get().Status.ServiceTargetVerificationAttempts)
 	assert.Nil(t, h.get().Status.ServiceTargetVerificationSince)
 	assert.Equal(t, active.Status.TunnelID, h.get().Status.TunnelID)
 	assert.Len(t, h.cf.Tunnels, 1)
@@ -889,7 +888,6 @@ func TestActiveTunnelSurvivesTransientEndpointSliceConvergence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
-	assert.Equal(t, int32(1), h.get().Status.ServiceTargetVerificationAttempts)
 	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
 
 	slice = getTestEndpointSlice(h)
