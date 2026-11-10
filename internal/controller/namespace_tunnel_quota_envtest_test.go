@@ -210,6 +210,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 			"CLOUDFLARE_ZONE_NAME":   "example.com",
 			"EDGE_BASE_DOMAIN":       "agents.example.com",
 			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
+			"EDGE_QUOTA_ADMIN_GROUPS": "quota-admins",
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, params))
@@ -225,6 +226,69 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	var binding admissionregistrationv1.ValidatingAdmissionPolicyBinding
 	require.NoError(t, yaml.Unmarshal(bindingYAML, &binding))
 	require.NoError(t, k8s.Create(ctx, &binding))
+
+	quotaPolicyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_validatingadmissionpolicy.yaml"))
+	require.NoError(t, err)
+	var quotaPolicy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.Unmarshal(quotaPolicyYAML, &quotaPolicy))
+	require.NoError(t, k8s.Create(ctx, &quotaPolicy))
+
+	quotaBindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_validatingadmissionpolicybinding.yaml"))
+	require.NoError(t, err)
+	var quotaBinding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	require.NoError(t, yaml.Unmarshal(quotaBindingYAML, &quotaBinding))
+	require.NoError(t, k8s.Create(ctx, &quotaBinding))
+
+	// Namespace quota limits are an administrative capacity decision. A
+	// tenant with broad custom-resource write access must not be able to
+	// create, raise, or remove its own quota. Configured admin groups can.
+	tenantUser, err := testEnv.AddUser("quota-tenant", []string{"tenant-users"}, cfg)
+	require.NoError(t, err)
+	tenantClient, err := client.New(tenantUser.Config, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	quotaAdmin, err := testEnv.AddUser("quota-admin", []string{"quota-admins"}, cfg)
+	require.NoError(t, err)
+	quotaAdminClient, err := client.New(quotaAdmin.Config, client.Options{Scheme: scheme})
+	require.NoError(t, err)
+
+	quotaNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "quota-policy"}}
+	require.NoError(t, k8s.Create(ctx, quotaNamespace))
+	quotaObject := func() *agentopsv1alpha1.NamespaceTunnelQuota {
+		return &agentopsv1alpha1.NamespaceTunnelQuota{
+			ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "quota-policy"},
+			Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+		}
+	}
+	quotaCreateDenied := false
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		attempt := quotaObject()
+		createErr := tenantClient.Create(ctx, attempt)
+		if apierrors.IsForbidden(createErr) || apierrors.IsInvalid(createErr) {
+			quotaCreateDenied = true
+			break
+		}
+		if createErr != nil {
+			t.Fatalf("unexpected error while waiting for quota admin policy: %v", createErr)
+		}
+		require.NoError(t, k8s.Delete(ctx, attempt), "remove quota admitted before policy activation")
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, quotaCreateDenied, "tenant users must not create namespace quota objects")
+
+	quota := quotaObject()
+	require.NoError(t, quotaAdminClient.Create(ctx, quota), "configured quota admin group should create quotas")
+	var tenantView agentopsv1alpha1.NamespaceTunnelQuota
+	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(quota), &tenantView))
+	tenantView.Spec.Limit = 1000
+	require.Error(t, tenantClient.Update(ctx, &tenantView), "tenant users must not raise their own quota")
+	require.NoError(t, tenantClient.Delete(ctx, quota), "the admission policy should reject tenant quota deletion")
+	// The failed delete must leave the quota in place; a configured admin can
+	// update and delete it.
+	require.NoError(t, quotaAdminClient.Get(ctx, client.ObjectKeyFromObject(quota), quota))
+	quota.Spec.Limit = 2
+	require.NoError(t, quotaAdminClient.Update(ctx, quota))
+	require.NoError(t, quotaAdminClient.Delete(ctx, quota))
 
 	// The API server may need a short interval to observe the policy and binding.
 	// Probe enforcement itself instead of depending on status controllers that
