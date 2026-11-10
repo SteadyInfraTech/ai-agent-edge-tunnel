@@ -282,6 +282,10 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(quota), &tenantView))
 	tenantView.Spec.Limit = 1000
 	require.Error(t, tenantClient.Update(ctx, &tenantView), "tenant users must not raise their own quota")
+	tenantView.Status.Reservations = []agentopsv1alpha1.TunnelReservation{{Name: "forged", UID: "forged-uid"}}
+	require.Error(t, tenantClient.Status().Update(ctx, &tenantView), "tenant users must not forge quota reservations")
+	require.Error(t, quotaAdminClient.Status().Update(ctx, &tenantView), "quota admins may manage limits but not the operator-owned reservation ledger")
+	require.NoError(t, k8s.Status().Update(ctx, &tenantView), "system:masters must retain break-glass status access")
 	require.Error(t, tenantClient.Delete(ctx, quota), "tenant users must not delete namespace quotas")
 	// The failed delete must leave the quota in place; a configured admin can
 	// update and delete it.
