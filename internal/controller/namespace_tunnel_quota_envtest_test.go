@@ -282,7 +282,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(quota), &tenantView))
 	tenantView.Spec.Limit = 1000
 	require.Error(t, tenantClient.Update(ctx, &tenantView), "tenant users must not raise their own quota")
-	require.NoError(t, tenantClient.Delete(ctx, quota), "the admission policy should reject tenant quota deletion")
+	require.Error(t, tenantClient.Delete(ctx, quota), "tenant users must not delete namespace quotas")
 	// The failed delete must leave the quota in place; a configured admin can
 	// update and delete it.
 	require.NoError(t, quotaAdminClient.Get(ctx, client.ObjectKeyFromObject(quota), quota))
