@@ -61,6 +61,11 @@ unstructured, so this operator does not depend on agentops-operator and starts w
   needs no action here, because the session's phase decides. `spec.ttl` is only an optional hard cap.
 - **Target.** Only an endpoint of the form `http://<service>.<this namespace>.svc:<port>` is accepted;
   anything else (another namespace, another host, https, a path) is refused and nothing is created.
+- **Service isolation.** The target must be a selector-backed ClusterIP Service with a TCP port.
+  ExternalName, headless, selectorless, and external-IP Services are rejected. Every EndpointSlice
+  endpoint must reference a non-hostNetwork Pod selected by that Service in the same namespace,
+  and its addresses must match that Pod's IPs. Service and EndpointSlice changes are rechecked;
+  an active tunnel is terminated if its origin becomes unsafe.
 - **Latency.** The session is polled every 10 seconds, so a tunnel can outlive its session by up to that long.
 - **Isolation.** The tunnel exposes the agent's Service, not one session. Access decides who can reach it,
   not which session they may use; see the design note for what that means for multi-session agents.

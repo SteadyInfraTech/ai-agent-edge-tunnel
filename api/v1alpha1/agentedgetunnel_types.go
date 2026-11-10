@@ -16,7 +16,8 @@ type WebhookValidation struct {
 	SecretRef string `json:"secretRef,omitempty"`
 }
 
-// ServiceTarget is the in-namespace Service that the tunnel routes to.
+// ServiceTarget is a selector-backed ClusterIP Service in the same namespace.
+// ExternalName, headless, selectorless, and Services with externalIPs are rejected.
 type ServiceTarget struct {
 	// Name of a Service in the same namespace as the AgentEdgeTunnel.
 	Name string `json:"name"`
