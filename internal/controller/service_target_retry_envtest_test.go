@@ -159,7 +159,7 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 	require.Equal(t, startedAt, got.Status.ServiceTargetVerificationSince)
 
 	// Simulate normal EndpointSlice convergence before the 30-second deadline.
-	require.NoError(t, k8s.Get(ctx, sliceKey, &slice))
+	require.NoError(t, k8s.Get(ctx, sliceKey, slice))
 	slice.Endpoints[0].Addresses = []string{"10.244.0.10"}
 	require.NoError(t, k8s.Update(ctx, slice))
 	require.Eventually(t, func() bool {
