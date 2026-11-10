@@ -295,7 +295,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Delete(ctx, params))
 	breakGlassQuota := quotaObject()
 	require.NoError(t, k8s.Create(ctx, breakGlassQuota), "system:masters must retain quota recovery access without policy parameters")
-	require.NoError(t, tenantClient.Create(ctx, quotaObject()), "non-admin groups must remain denied when policy parameters are missing")
+	require.Error(t, tenantClient.Create(ctx, quotaObject()), "non-admin groups must remain denied when policy parameters are missing")
 	require.NoError(t, k8s.Delete(ctx, breakGlassQuota))
 	params = &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
