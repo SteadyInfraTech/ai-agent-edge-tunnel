@@ -148,14 +148,14 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 	)
 	validPolicy := `[{"id":"policy-1","decision":"allow","include":[{"email":{"email":"dev@example.com"}}],"exclude":[],"require":[]}]`
 	tests := []struct {
-		name          string
-		appStatus            int
-		destinations         string
-		preflightBypass      bool
-		policies             string
-		allowedEmails []string
-		wantMatch     bool
-		wantErr       bool
+		name            string
+		appStatus       int
+		destinations    string
+		preflightBypass bool
+		policies        string
+		allowedEmails   []string
+		wantMatch       bool
+		wantErr         bool
 	}{
 		{
 			name:          "exact email allowlist",
@@ -202,10 +202,10 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			wantMatch:     true,
 		},
 		{
-			name:          "options preflight bypass",
+			name:            "options preflight bypass",
 			preflightBypass: true,
-			policies:      validPolicy,
-			allowedEmails: []string{"dev@example.com"},
+			policies:        validPolicy,
+			allowedEmails:   []string{"dev@example.com"},
 		},
 		{
 			name:          "public destination override",

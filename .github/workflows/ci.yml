@@ -35,7 +35,6 @@ jobs:
           unformatted="$(gofmt -l $(git ls-files '*.go' | grep -v zz_generated))"
           if [ -n "$unformatted" ]; then
             echo "$unformatted"
-            gofmt -d $unformatted
             exit 1
           fi
 
