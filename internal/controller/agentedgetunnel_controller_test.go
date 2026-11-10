@@ -1046,6 +1046,11 @@ func TestPublicNamespaceAllowlistUsesExactNames(t *testing.T) {
 func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
 	cases := map[string]func(*harness){
 		"application deleted": func(h *harness) { delete(h.cf.AccessApps, h.get().Status.AccessAppID) },
+		"public destination override": func(h *harness) {
+			app := h.cf.AccessApps[h.get().Status.AccessAppID]
+			app.HasPublicOverride = true
+			h.cf.AccessApps[h.get().Status.AccessAppID] = app
+		},
 		"allow policy removed": func(h *harness) {
 			app := h.cf.AccessApps[h.get().Status.AccessAppID]
 			app.Emails = nil
