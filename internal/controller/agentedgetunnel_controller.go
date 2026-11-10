@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +31,17 @@ import (
 	cf "github.com/SteadyInfraTech/ai-agent-edge-tunnel/internal/cloudflare"
 )
 
-var errAccessPolicyDrift = errors.New("cloudflare access policy drift detected")
+var (
+	errAccessPolicyDrift      = errors.New("cloudflare access policy drift detected")
+	errUnsafeServiceTarget    = errors.New("service target is not safe to expose")
+	errTransientServiceTarget = errors.New("service target endpoints are not yet settled")
+)
+
+const (
+	serviceTargetGracePeriod   = 30 * time.Second
+	serviceTargetRetryInterval = 2 * time.Second
+	serviceTargetFailedRequeue = 10 * time.Second
+)
 
 const (
 	// FinalizerName blocks deletion of an AgentEdgeTunnel until its Cloudflare
@@ -303,6 +315,9 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		log.FromContext(ctx).Info("AgentEdgeTunnel reached TTL; removing Cloudflare resources", "name", t.Name)
 		return ctrl.Result{}, r.terminate(ctx, t, "TTL expired; Cloudflare resources removed")
 	}
+	if err := r.verifyTunnelServiceTarget(ctx, t); err != nil {
+		return r.handleServiceTargetVerificationError(ctx, t, err)
+	}
 
 	// An object that became Active without an Access application (for example
 	// under an older operator) is already reachable. Create the policy now and
@@ -366,6 +381,8 @@ func (r *AgentEdgeTunnelReconciler) terminate(ctx context.Context, t *agentopsv1
 	t.Status.TunnelID = ""
 	t.Status.AccessAppID = ""
 	t.Status.ConnectorReady = false
+	t.Status.ServiceTargetVerificationSince = nil
+	t.Status.ServiceTargetVerificationTarget = ""
 	if err := r.Status().Update(ctx, t); err != nil {
 		return err
 	}
@@ -394,6 +411,9 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 		t.Status.Phase = agentopsv1alpha1.PhaseFailed
 		t.Status.Message = err.Error()
 		return ctrl.Result{}, r.Status().Update(ctx, t)
+	}
+	if err := r.verifyTunnelServiceTarget(ctx, t); err != nil {
+		return r.handleServiceTargetVerificationError(ctx, t, err)
 	}
 
 	if err := r.ensureQuotaReservation(ctx, t, t.Status.TunnelID != ""); err != nil {
@@ -1003,6 +1023,227 @@ func (r *AgentEdgeTunnelReconciler) validateOperatorPolicy(t *agentopsv1alpha1.A
 	return nil
 }
 
+// verifyTunnelServiceTarget validates the Kubernetes Service and every
+// endpoint the cluster would route to before exposing it through cloudflared.
+func (r *AgentEdgeTunnelReconciler) verifyTunnelServiceTarget(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	target := t.Spec.Service
+	if target == nil && t.Spec.SessionRef != nil {
+		if t.Status.SessionEndpoint == "" {
+			return fmt.Errorf("%w: the pinned AgentSession has no recorded endpoint", errUnsafeServiceTarget)
+		}
+		var err error
+		target, err = parseEndpoint(t.Status.SessionEndpoint, t.Namespace)
+		if err != nil {
+			return fmt.Errorf("%w: invalid recorded AgentSession endpoint: %v", errUnsafeServiceTarget, err)
+		}
+	}
+	if target == nil {
+		if t.Status.ServiceTargetVerificationTarget != "" || t.Status.ServiceTargetVerificationSince != nil {
+			t.Status.ServiceTargetVerificationTarget = ""
+			t.Status.ServiceTargetVerificationSince = nil
+			return r.Status().Update(ctx, t)
+		}
+		return nil
+	}
+	targetKey := fmt.Sprintf("%s:%d", target.Name, target.Port)
+	statusChanged := false
+	if t.Status.ServiceTargetVerificationTarget != targetKey {
+		t.Status.ServiceTargetVerificationTarget = targetKey
+		t.Status.ServiceTargetVerificationSince = nil
+		statusChanged = true
+	}
+	if err := r.verifyServiceTarget(ctx, t.Namespace, target); err != nil {
+		return err
+	}
+	if t.Status.ServiceTargetVerificationSince != nil {
+		t.Status.ServiceTargetVerificationSince = nil
+		statusChanged = true
+	}
+	if statusChanged {
+		if err := r.Status().Update(ctx, t); err != nil {
+			return fmt.Errorf("resetting Service target verification state: %w", err)
+		}
+	}
+	return nil
+}
+
+// verifyServiceTarget permits only a ClusterIP Service selected by Pods in the
+// same namespace. It also verifies every EndpointSlice address against the IPs
+// of those selected Pods; a tenant-created ExternalName, selectorless Service,
+// or manually injected endpoint cannot turn the connector into a proxy to an
+// arbitrary network destination.
+func (r *AgentEdgeTunnelReconciler) verifyServiceTarget(ctx context.Context, namespace string, target *agentopsv1alpha1.ServiceTarget) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	key := client.ObjectKey{Namespace: namespace, Name: target.Name}
+	var service corev1.Service
+	if err := reader.Get(ctx, key, &service); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: Service %s/%s does not exist", errUnsafeServiceTarget, namespace, target.Name)
+		}
+		return fmt.Errorf("getting Service %s/%s: %w", namespace, target.Name, err)
+	}
+	if service.Spec.Type != "" && service.Spec.Type != corev1.ServiceTypeClusterIP {
+		return fmt.Errorf("%w: Service %s/%s must be type ClusterIP", errUnsafeServiceTarget, namespace, target.Name)
+	}
+	if service.Spec.ClusterIP == "" || service.Spec.ClusterIP == corev1.ClusterIPNone {
+		return fmt.Errorf("%w: Service %s/%s must have a ClusterIP (headless Services are not allowed)", errUnsafeServiceTarget, namespace, target.Name)
+	}
+	if len(service.Spec.Selector) == 0 {
+		return fmt.Errorf("%w: Service %s/%s must select Pods in its own namespace", errUnsafeServiceTarget, namespace, target.Name)
+	}
+	if len(service.Spec.ExternalIPs) != 0 {
+		return fmt.Errorf("%w: Service %s/%s must not declare externalIPs", errUnsafeServiceTarget, namespace, target.Name)
+	}
+	portFound := false
+	for _, port := range service.Spec.Ports {
+		if port.Port == target.Port && (port.Protocol == "" || port.Protocol == corev1.ProtocolTCP) {
+			portFound = true
+			break
+		}
+	}
+	if !portFound {
+		return fmt.Errorf("%w: Service %s/%s does not expose TCP port %d", errUnsafeServiceTarget, namespace, target.Name, target.Port)
+	}
+
+	var pods corev1.PodList
+	if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels(service.Spec.Selector)); err != nil {
+		return fmt.Errorf("listing Pods selected by Service %s/%s: %w", namespace, target.Name, err)
+	}
+	selectedPods := make(map[string]*corev1.Pod, len(pods.Items))
+	podIPs := make(map[string]map[string]struct{}, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		selectedPods[pod.Name] = pod
+		ips := make(map[string]struct{})
+		addIP := func(value string) {
+			if ip := net.ParseIP(value); ip != nil {
+				ips[ip.String()] = struct{}{}
+			}
+		}
+		addIP(pod.Status.PodIP)
+		for _, podIP := range pod.Status.PodIPs {
+			addIP(podIP.IP)
+		}
+		podIPs[pod.Name] = ips
+	}
+
+	var slices discoveryv1.EndpointSliceList
+	if err := reader.List(ctx, &slices, client.InNamespace(namespace), client.MatchingLabels{discoveryv1.LabelServiceName: target.Name}); err != nil {
+		return fmt.Errorf("listing EndpointSlices for Service %s/%s: %w", namespace, target.Name, err)
+	}
+	for i := range slices.Items {
+		slice := &slices.Items[i]
+		if slice.AddressType != discoveryv1.AddressTypeIPv4 && slice.AddressType != discoveryv1.AddressTypeIPv6 {
+			return fmt.Errorf("%w: EndpointSlice %s/%s has unsupported address type %q", errUnsafeServiceTarget, namespace, slice.Name, slice.AddressType)
+		}
+		for _, endpoint := range slice.Endpoints {
+			ref := endpoint.TargetRef
+			if ref == nil || ref.Kind != "Pod" || ref.Namespace != namespace || ref.Name == "" || (ref.APIVersion != "" && ref.APIVersion != "v1") {
+				return fmt.Errorf("%w: EndpointSlice %s/%s contains an endpoint not backed by a Pod in namespace %q", errUnsafeServiceTarget, namespace, slice.Name, namespace)
+			}
+			pod, ok := selectedPods[ref.Name]
+			if !ok || (ref.UID != "" && ref.UID != pod.UID) {
+				return fmt.Errorf("%w: EndpointSlice %s/%s references a Pod not yet selected by Service %s/%s", errTransientServiceTarget, namespace, slice.Name, namespace, target.Name)
+			}
+			if pod.Spec.HostNetwork {
+				return fmt.Errorf("%w: Service %s/%s selects hostNetwork Pod %s", errUnsafeServiceTarget, namespace, target.Name, pod.Name)
+			}
+			if len(endpoint.Addresses) == 0 {
+				return fmt.Errorf("%w: EndpointSlice %s/%s contains an endpoint without addresses", errTransientServiceTarget, namespace, slice.Name)
+			}
+			for _, address := range endpoint.Addresses {
+				ip := net.ParseIP(address)
+				if ip == nil || (slice.AddressType == discoveryv1.AddressTypeIPv4 && ip.To4() == nil) || (slice.AddressType == discoveryv1.AddressTypeIPv6 && (ip.To16() == nil || ip.To4() != nil)) {
+					return fmt.Errorf("%w: EndpointSlice %s/%s contains an invalid address %q", errUnsafeServiceTarget, namespace, slice.Name, address)
+				}
+				if _, ok := podIPs[pod.Name][ip.String()]; !ok {
+					return fmt.Errorf("%w: EndpointSlice %s/%s address %q does not yet match selected Pod %s", errTransientServiceTarget, namespace, slice.Name, address, pod.Name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// handleServiceTargetVerificationError retries rollout-related endpoint
+// mismatches for a bounded grace period. The deadline is persisted in status,
+// so status updates and watch events cannot consume the retry window early.
+// Definitive unsafe configuration is rejected immediately.
+func (r *AgentEdgeTunnelReconciler) handleServiceTargetVerificationError(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, cause error) (ctrl.Result, error) {
+	if errors.Is(cause, errTransientServiceTarget) {
+		now := r.now()
+		if t.Status.ServiceTargetVerificationSince == nil {
+			since := metav1.NewTime(now)
+			t.Status.ServiceTargetVerificationSince = &since
+			t.Status.Message = "waiting for Kubernetes Service endpoints to converge: " + cause.Error()
+			if t.Status.TunnelID == "" {
+				t.Status.Phase = agentopsv1alpha1.PhasePending
+			}
+			if err := r.Status().Update(ctx, t); err != nil {
+				return ctrl.Result{}, fmt.Errorf("recording Service target verification start: %w", err)
+			}
+		}
+		elapsed := now.Sub(t.Status.ServiceTargetVerificationSince.Time)
+		if elapsed < serviceTargetGracePeriod {
+			remaining := serviceTargetGracePeriod - elapsed
+			requeueAfter := serviceTargetRetryInterval
+			if remaining < requeueAfter {
+				requeueAfter = remaining
+			}
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
+		cause = fmt.Errorf("%w: Service endpoints remained inconsistent for %s: %v", errUnsafeServiceTarget, serviceTargetGracePeriod, cause)
+	}
+
+	if errors.Is(cause, errUnsafeServiceTarget) {
+		if t.Status.TunnelID != "" {
+			return ctrl.Result{}, r.terminate(ctx, t, "service target became unsafe; tunnel removed: "+cause.Error())
+		}
+		if t.Status.Phase != agentopsv1alpha1.PhaseFailed || t.Status.Message != cause.Error() {
+			t.Status.Phase = agentopsv1alpha1.PhaseFailed
+			t.Status.Message = cause.Error()
+			if err := r.Status().Update(ctx, t); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: serviceTargetFailedRequeue}, nil
+	}
+
+	verificationErr := fmt.Errorf("verifying Service target: %w", cause)
+	if t.Status.Phase == agentopsv1alpha1.PhaseActive {
+		t.Status.Message = "UNPROTECTED: unable to verify Service target: " + cause.Error()
+		if err := r.Status().Update(ctx, t); err != nil {
+			return ctrl.Result{}, errors.Join(verificationErr, fmt.Errorf("recording Service verification failure: %w", err))
+		}
+	}
+	return ctrl.Result{}, verificationErr
+}
+
+// enqueueServiceTunnels maps a Service or EndpointSlice change to tunnels that
+// use that Service, so a changed target is revalidated without waiting for the
+// periodic active-tunnel requeue.
+func (r *AgentEdgeTunnelReconciler) enqueueServiceTunnels(ctx context.Context, namespace, serviceName string) []reconcile.Request {
+	var tunnels agentopsv1alpha1.AgentEdgeTunnelList
+	if err := r.List(ctx, &tunnels, client.InNamespace(namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Unable to enqueue tunnels after Service target change", "namespace", namespace, "service", serviceName)
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(tunnels.Items))
+	for i := range tunnels.Items {
+		target := tunnels.Items[i].Spec.Service
+		if target == nil && tunnels.Items[i].Spec.SessionRef != nil && tunnels.Items[i].Status.SessionEndpoint != "" {
+			target, _ = parseEndpoint(tunnels.Items[i].Status.SessionEndpoint, namespace)
+		}
+		if target != nil && target.Name == serviceName {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&tunnels.Items[i])})
+		}
+	}
+	return requests
+}
+
 // hostname returns the public hostname for t under the configured base domain.
 func (r *AgentEdgeTunnelReconciler) hostname(t *agentopsv1alpha1.AgentEdgeTunnel) string {
 	return fmt.Sprintf("%s.%s", t.Spec.Cloudflare.Subdomain, strings.TrimPrefix(r.BaseDomain, "."))
@@ -1061,5 +1302,15 @@ func (r *AgentEdgeTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return requests
 			},
 		)).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return r.enqueueServiceTunnels(ctx, obj.GetNamespace(), obj.GetName())
+		})).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			serviceName := obj.GetLabels()[discoveryv1.LabelServiceName]
+			if serviceName == "" {
+				return nil
+			}
+			return r.enqueueServiceTunnels(ctx, obj.GetNamespace(), serviceName)
+		})).
 		Complete(r)
 }

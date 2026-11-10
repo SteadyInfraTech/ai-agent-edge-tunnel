@@ -192,3 +192,8 @@ spec:
               expiresAt:
                 type: string
                 format: date-time
+              serviceTargetVerificationSince:
+                type: string
+                format: date-time
+              serviceTargetVerificationTarget:
+                type: string

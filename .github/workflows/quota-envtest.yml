@@ -28,5 +28,8 @@ jobs:
           test -x "$assets/kube-apiserver"
           test -x "$assets/etcd"
           echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
-      - name: Run namespace quota envtest
-        run: go test -race -count=1 ./internal/controller -run '^TestNamespaceQuotaEnvtest$'
+      - name: Run Kubernetes API-server envtests
+        run: go test -race -count=1 ./internal/controller -run Envtest
+
+
+

@@ -16,7 +16,8 @@ type WebhookValidation struct {
 	SecretRef string `json:"secretRef,omitempty"`
 }
 
-// ServiceTarget is the in-namespace Service that the tunnel routes to.
+// ServiceTarget is a selector-backed ClusterIP Service in the same namespace.
+// ExternalName, headless, selectorless, and Services with externalIPs are rejected.
 type ServiceTarget struct {
 	// Name of a Service in the same namespace as the AgentEdgeTunnel.
 	Name string `json:"name"`
@@ -110,6 +111,10 @@ type AgentEdgeTunnelStatus struct {
 	// session bound to a different endpoint later ends the tunnel.
 	SessionEndpoint string       `json:"sessionEndpoint,omitempty"`
 	ExpiresAt       *metav1.Time `json:"expiresAt,omitempty"`
+	// ServiceTargetVerificationSince is the start of the current transient mismatch grace period.
+	ServiceTargetVerificationSince *metav1.Time `json:"serviceTargetVerificationSince,omitempty"`
+	// ServiceTargetVerificationTarget identifies the Service target associated with the grace period.
+	ServiceTargetVerificationTarget string `json:"serviceTargetVerificationTarget,omitempty"`
 }
 
 // +kubebuilder:object:root=true

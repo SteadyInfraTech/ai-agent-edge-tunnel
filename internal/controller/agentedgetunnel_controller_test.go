@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,6 +48,7 @@ type harness struct {
 func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), objs ...client.Object) *harness {
 	t.Helper()
 	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme.Scheme))
+	require.NoError(t, discoveryv1.AddToScheme(scheme.Scheme))
 
 	cr := &agentopsv1alpha1.AgentEdgeTunnel{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-agent-tunnel", Namespace: "default", UID: "11111111-aaaa-bbbb-cccc-222222222222"},
@@ -60,9 +62,12 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 	if mutate != nil {
 		mutate(cr)
 	}
+	fixtures := append(serviceTestFixtures(cr.Namespace, "langgraph-worker", "10.96.0.10", "10.244.0.10"), serviceTestFixtures(cr.Namespace, "support-agent", "10.96.0.11", "10.244.0.11")...)
+	objects := append([]client.Object{cr}, fixtures...)
+	objects = append(objects, objs...)
 	k8s := fakeclient.NewClientBuilder().
 		WithScheme(scheme.Scheme).
-		WithObjects(append([]client.Object{cr}, objs...)...).
+		WithObjects(objects...).
 		WithStatusSubresource(cr, &appsv1.Deployment{}, &agentopsv1alpha1.NamespaceTunnelQuota{}).
 		Build()
 	h := &harness{
@@ -74,6 +79,7 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 	}
 	h.r = &AgentEdgeTunnelReconciler{
 		Client:           k8s,
+		APIReader:        k8s,
 		Scheme:           scheme.Scheme,
 		CloudflareClient: h.cf,
 		AccountID:        "fake-account",
@@ -85,6 +91,34 @@ func newHarness(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel), ob
 		Now:    func() time.Time { return h.now },
 	}
 	return h
+}
+
+// serviceTestFixtures builds a selector-backed ClusterIP Service and the
+// EndpointSlice the Kubernetes controller would publish for its selected Pod.
+func serviceTestFixtures(namespace, name, clusterIP, podIP string) []client.Object {
+	podName := name + "-pod"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace, UID: types.UID("uid-" + podName), Labels: map[string]string{"app": name}},
+		Status:     corev1.PodStatus{PodIP: podIP, PodIPs: []corev1.PodIP{{IP: podIP}}},
+	}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Type:      corev1.ServiceTypeClusterIP,
+			ClusterIP: clusterIP,
+			Selector:  map[string]string{"app": name},
+			Ports:     []corev1.ServicePort{{Port: 8080, Protocol: corev1.ProtocolTCP}},
+		},
+	}
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta:  metav1.ObjectMeta{Name: name + "-slice", Namespace: namespace, Labels: map[string]string{discoveryv1.LabelServiceName: name}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{podIP},
+			TargetRef: &corev1.ObjectReference{APIVersion: "v1", Kind: "Pod", Namespace: namespace, Name: podName, UID: pod.UID},
+		}},
+	}
+	return []client.Object{service, pod, slice}
 }
 
 // reconcile runs one reconcile pass for the harness object.
@@ -673,6 +707,219 @@ func TestRejectsInvalidServiceTarget(t *testing.T) {
 			assert.Zero(t, h.cf.CreateTunnelCalls, "nothing may be created for an invalid spec")
 		})
 	}
+}
+
+// TestRejectsUnsafeServiceTargetsBeforeProvisioning ensures a tunnel cannot
+// route through an ExternalName, headless, selectorless, or manually redirected
+// Service, or to a Pod outside the Service's own selector.
+func TestRejectsUnsafeServiceTargetsBeforeProvisioning(t *testing.T) {
+	cases := map[string]func(*harness){
+		"missing Service": func(h *harness) {
+			var service corev1.Service
+			require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker"}, &service))
+			require.NoError(h.t, h.k8s.Delete(context.Background(), &service))
+		},
+		"ExternalName Service": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.Type = corev1.ServiceTypeExternalName
+			service.Spec.ExternalName = "169.254.169.254"
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"headless Service": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.ClusterIP = corev1.ClusterIPNone
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"selectorless Service": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.Selector = nil
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"Service with externalIPs": func(h *harness) {
+			service := getTestService(h)
+			service.Spec.ExternalIPs = []string{"192.0.2.10"}
+			require.NoError(h.t, h.k8s.Update(context.Background(), service))
+		},
+		"requested port is not exposed": func(h *harness) {
+			cr := h.get()
+			cr.Spec.Service.Port = 9090
+			require.NoError(h.t, h.k8s.Update(context.Background(), &cr))
+		},
+		"EndpointSlice has no Pod reference": func(h *harness) {
+			slice := getTestEndpointSlice(h)
+			slice.Endpoints[0].TargetRef = nil
+			require.NoError(h.t, h.k8s.Update(context.Background(), slice))
+		},
+		"EndpointSlice references another namespace": func(h *harness) {
+			slice := getTestEndpointSlice(h)
+			slice.Endpoints[0].TargetRef.Namespace = "kube-system"
+			require.NoError(h.t, h.k8s.Update(context.Background(), slice))
+		},
+		"selected Pod uses host networking": func(h *harness) {
+			pod := getTestPod(h)
+			pod.Spec.HostNetwork = true
+			require.NoError(h.t, h.k8s.Update(context.Background(), pod))
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			mutate(h)
+			_, err := h.reconcile()
+			require.NoError(t, err, "an unsafe Service target is recorded as a policy failure")
+			assert.Equal(t, agentopsv1alpha1.PhaseFailed, h.get().Status.Phase)
+			assert.Contains(t, h.get().Status.Message, errUnsafeServiceTarget.Error())
+			assert.Zero(t, h.cf.CreateTunnelCalls, "Cloudflare resources must not be created for an unsafe origin")
+		})
+	}
+}
+
+// TestProvisioningRetriesTransientServiceEndpointMismatch ensures a tunnel
+// without a recorded Cloudflare ID remains Pending and rechecks without waiting
+// for another Kubernetes event.
+func TestProvisioningRetriesTransientServiceEndpointMismatch(t *testing.T) {
+	h := newHarness(t, nil)
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhasePending, h.get().Status.Phase)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	assert.NotNil(t, h.get().Status.ServiceTargetVerificationSince)
+	assert.Zero(t, h.cf.CreateTunnelCalls)
+}
+
+// TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch
+// ensures provisioning does not destroy an already-created tunnel during a
+// short Pod/EndpointSlice rollout race.
+func TestPendingTunnelWithRecordedIDRetriesTransientServiceEndpointMismatch(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	active.Status.Phase = agentopsv1alpha1.PhasePending
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &active))
+
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhasePending, h.get().Status.Phase)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	assert.Equal(t, active.Status.TunnelID, h.get().Status.TunnelID)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
+
+	slice = getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"10.244.0.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Nil(t, h.get().Status.ServiceTargetVerificationSince)
+	assert.Equal(t, active.Status.TunnelID, h.get().Status.TunnelID)
+	assert.Len(t, h.cf.Tunnels, 1)
+}
+
+// TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe ensures an
+// EndpointSlice mismatch is tolerated for a time-bounded grace period, then
+// removes an already-exposed tunnel if the mismatch persists. Immediate
+// reconciles model status-update/watch events and must not consume that period.
+func TestActiveTunnelTerminatesWhenServiceEndpointRemainsUnsafe(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	require.Len(t, h.cf.Tunnels, 1)
+	require.NotEmpty(t, h.cf.DNSRecords)
+
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	startedAt := h.get().Status.ServiceTargetVerificationSince
+	require.NotNil(t, startedAt)
+	require.True(t, startedAt.Time.Equal(h.now), "verification start should use the reconciler clock")
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+
+	// The status update above would enqueue another reconcile through the
+	// controller's primary watch. Repeated immediate reconciles must not
+	// consume the grace period or terminate a healthy tunnel during a rollout.
+	for i := 0; i < 8; i++ {
+		res, err = h.reconcile()
+		require.NoError(t, err)
+		assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+		assert.Equal(t, startedAt, h.get().Status.ServiceTargetVerificationSince)
+		assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+		assert.Len(t, h.cf.Tunnels, 1)
+		assert.NotEmpty(t, h.cf.DNSRecords)
+	}
+
+	h.now = h.now.Add(serviceTargetGracePeriod + time.Second)
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "service target became unsafe")
+	assert.Empty(t, h.cf.DNSRecords)
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.AccessApps)
+	h.assertConnectorGone()
+}
+
+// TestActiveTunnelSurvivesTransientEndpointSliceConvergence ensures a
+// rollout-related Pod/EndpointSlice mismatch is retried and recovers in place.
+func TestActiveTunnelSurvivesTransientEndpointSliceConvergence(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	slice := getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"192.0.2.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, serviceTargetRetryInterval, res.RequeueAfter)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+
+	slice = getTestEndpointSlice(h)
+	slice.Endpoints[0].Addresses = []string{"10.244.0.10"}
+	require.NoError(t, h.k8s.Update(context.Background(), slice))
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Nil(t, h.get().Status.ServiceTargetVerificationSince)
+	assert.Contains(t, h.cf.Tunnels, active.Status.TunnelID)
+	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname])
+}
+
+func getTestService(h *harness) *corev1.Service {
+	h.t.Helper()
+	var service corev1.Service
+	require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker"}, &service))
+	return &service
+}
+
+func getTestPod(h *harness) *corev1.Pod {
+	h.t.Helper()
+	var pod corev1.Pod
+	require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker-pod"}, &pod))
+	return &pod
+}
+
+func getTestEndpointSlice(h *harness) *discoveryv1.EndpointSlice {
+	h.t.Helper()
+	var slice discoveryv1.EndpointSlice
+	require.NoError(h.t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "langgraph-worker-slice"}, &slice))
+	return &slice
 }
 
 // TestAmbiguousAccessStatusWriteKeepsTheApplication checks: a failed status
