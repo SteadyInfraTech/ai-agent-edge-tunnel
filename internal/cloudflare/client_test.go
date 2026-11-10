@@ -150,9 +150,11 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 	tests := []struct {
 		name          string
 		appStatus     int
+		destinations  string
 		policies      string
 		allowedEmails []string
 		wantMatch     bool
+		wantErr       bool
 	}{
 		{
 			name:          "exact email allowlist",
@@ -191,6 +193,32 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			appStatus:     http.StatusNotFound,
 			allowedEmails: []string{"dev@example.com"},
 		},
+		{
+			name:          "public destination override",
+			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\",\"overrides\":[{\"behavior\":\"public\",\"path_pattern\":\"/health\"}]}]",
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "unexpected destination",
+			destinations:  "[{\"type\":\"public\",\"uri\":\"other.example.com\"}]",
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "multiple destinations",
+			destinations:  "[{\"type\":\"public\",\"uri\":\"agent.example.com\"},{\"type\":\"public\",\"uri\":\"other.example.com\"}]",
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "malformed destinations",
+			destinations:  "{\"type\":\"public\"}",
+			allowedEmails: []string{"dev@example.com"},
+		},
+		{
+			name:          "application API error",
+			appStatus:     http.StatusInternalServerError,
+			allowedEmails: []string{"dev@example.com"},
+			wantErr:       true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -198,12 +226,17 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID):
-					if tt.appStatus == http.StatusNotFound {
-						w.WriteHeader(http.StatusNotFound)
-						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1003,"message":"not found"}],"messages":[]}`)
+					if tt.appStatus != 0 {
+						w.WriteHeader(tt.appStatus)
+						_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"code":1003,"message":"test error"}],"messages":[]}`)
 						return
 					}
-					_, _ = fmt.Fprintf(w, `{"success":true,"result":{"id":%q,"name":%q,"domain":%q}}`, appID, appName, domain)
+					application := fmt.Sprintf(`{"id":%q,"name":%q,"domain":%q`, appID, appName, domain)
+					if tt.destinations != "" {
+						application += `,"destinations":` + tt.destinations
+					}
+					application += "}"
+					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s}`, application)
 				case strings.HasSuffix(r.URL.Path, "/access/apps/"+appID+"/policies"):
 					_, _ = fmt.Fprintf(w, `{"success":true,"result":%s,"result_info":{"page":1,"per_page":100,"count":1,"total_count":1,"total_pages":1}}`, tt.policies)
 				default:
@@ -218,6 +251,10 @@ func TestRealVerifyAccessPolicy(t *testing.T) {
 			client := &RealCloudflareClient{AccountID: accountID, api: api}
 
 			matches, err := client.VerifyAccessPolicy(context.Background(), accountID, appID, appName, domain, tt.allowedEmails)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantMatch, matches)
 		})
