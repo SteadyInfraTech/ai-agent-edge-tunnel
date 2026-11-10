@@ -32,7 +32,7 @@ spec:
         # or digest). EDGE_PUBLIC_NAMESPACES is an optional comma-separated
         # allowlist for security.allowPublic; empty means public tunnels are denied.
         # EDGE_QUOTA_ADMIN_GROUPS optionally lists groups allowed to manage namespace quotas;
-        # system:masters is always authorized.
+        # system:masters is authorized while the policy ConfigMap is available.
         # These values are deliberately not set here, so the operator refuses to start rather than
         # guess. Provide them without editing this file:
         #   kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
