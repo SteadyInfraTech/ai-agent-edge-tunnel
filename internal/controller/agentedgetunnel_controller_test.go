@@ -1446,3 +1446,60 @@ func TestActiveTunnelKeepsResourcesWhenAccessVerificationFails(t *testing.T) {
 	assert.Contains(t, h.cf.AccessApps, active.Status.AccessAppID)
 	assert.Len(t, h.cf.AccessApps, 1)
 }
+
+// TestAccessPolicyVerificationIsJitteredAndRateLimited verifies that frequent
+// session reconciles reuse the last verified policy, and Cloudflare 429s defer
+// the next verification without terminating or marking the tunnel unprotected.
+func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	require.Equal(t, agentopsv1alpha1.PhaseActive, active.Status.Phase)
+	require.NotNil(t, active.Status.AccessPolicyVerifiedAt)
+	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+	assert.Zero(t, h.cf.VerifyAccessCalls, "successful policy creation is the initial trusted verification")
+
+	firstCheck := active.Status.AccessPolicyNextCheckAt.Time
+	h.now = firstCheck.Add(-time.Second)
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Zero(t, h.cf.VerifyAccessCalls, "reconciles before the deadline must not call Cloudflare")
+
+	h.now = firstCheck
+	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
+	_, err = h.reconcile()
+	require.NoError(t, err, "rate limiting is deferred, not treated as policy drift")
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
+	assert.Contains(t, got.Status.Message, "rate-limited")
+	assert.Equal(t, active.Status.AccessPolicyVerifiedAt, got.Status.AccessPolicyVerifiedAt, "429 must preserve the last successful verification")
+	require.NotNil(t, got.Status.AccessPolicyNextCheckAt)
+	assert.Equal(t, h.now.Add(accessPolicyRateLimitBackoff), got.Status.AccessPolicyNextCheckAt.Time)
+	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname], "the existing route remains intact")
+	assert.Equal(t, 1, h.cf.VerifyAccessCalls)
+
+	h.cf.FindAccessErr = nil
+	h.now = got.Status.AccessPolicyNextCheckAt.Time
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	got = h.get()
+	assert.Equal(t, 2, h.cf.VerifyAccessCalls, "verification resumes after the backoff")
+	assert.Equal(t, h.now, got.Status.AccessPolicyVerifiedAt.Time)
+	assert.True(t, got.Status.AccessPolicyNextCheckAt.After(&metav1.Time{Time: h.now}))
+	assert.NotContains(t, got.Status.Message, "rate-limited")
+}
+
+// TestAccessPolicyVerificationIntervalIsJittered ensures each tunnel receives
+// a stable interval in the five-to-ten-minute range.
+func TestAccessPolicyVerificationIntervalIsJittered(t *testing.T) {
+	a := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: "uid-a"}}
+	b := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "ns", UID: "uid-b"}}
+	for _, tunnel := range []*agentopsv1alpha1.AgentEdgeTunnel{a, b} {
+		interval := accessPolicyVerificationInterval(tunnel)
+		assert.GreaterOrEqual(t, interval, 5*time.Minute)
+		assert.Less(t, interval, 10*time.Minute)
+		assert.Equal(t, interval, accessPolicyVerificationInterval(tunnel), "jitter must be stable for a given tunnel")
+	}
+	assert.NotEqual(t, accessPolicyVerificationInterval(a), accessPolicyVerificationInterval(b))
+}
