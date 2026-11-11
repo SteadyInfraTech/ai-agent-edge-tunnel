@@ -23,6 +23,10 @@ func TestActiveTunnelWithoutAccessAppGetsProtected(t *testing.T) {
 	// Simulate an object that went Active before Access applications existed.
 	cr := h.get()
 	cr.Status.AccessAppID = ""
+	// Removing the recorded application also invalidates the prior successful
+	// verification deadline; recovery must attempt Access setup immediately.
+	cr.Status.AccessPolicyVerifiedAt = nil
+	cr.Status.AccessPolicyNextCheckAt = nil
 	require.NoError(t, h.k8s.Status().Update(context.Background(), &cr))
 	clear(h.cf.AccessApps) // no application exists in Cloudflare either
 	h.cf.CreateAccessErr = errors.New("access api down")
@@ -51,6 +55,10 @@ func TestActiveTunnelThatLostItsAccessAppIDLeavesTheApplicationUntouched(t *test
 
 	cr := h.get()
 	cr.Status.AccessAppID = ""
+	// Removing the recorded application also invalidates the prior successful
+	// verification deadline; recovery must attempt Access setup immediately.
+	cr.Status.AccessPolicyVerifiedAt = nil
+	cr.Status.AccessPolicyNextCheckAt = nil
 	require.NoError(t, h.k8s.Status().Update(context.Background(), &cr))
 
 	_, err = h.reconcile()
