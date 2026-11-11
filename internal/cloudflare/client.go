@@ -42,6 +42,24 @@ type TunnelRef struct {
 }
 
 // AccessAppRef identifies an existing Access application.
+// HTTPStatusError preserves an HTTP response status for controller retry policy.
+type HTTPStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPStatusError) Error() string { return e.Message }
+
+// IsRateLimited reports whether err represents a Cloudflare HTTP 429 response.
+func IsRateLimited(err error) bool {
+	var httpErr *HTTPStatusError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	var apiErr *cloudflare.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests
+}
+
 type AccessAppRef struct {
 	ID string
 	// HasAllowPolicy is true when the application has at least one allow
@@ -430,7 +448,7 @@ func (c *RealCloudflareClient) getAccessApplicationConfig(ctx context.Context, a
 		return nil, nil
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("getting Access application %s: Cloudflare API returned HTTP %d: %s", appID, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("getting Access application %s: Cloudflare API returned HTTP %d: %s", appID, resp.StatusCode, strings.TrimSpace(string(body)))}
 	}
 
 	var envelope struct {
