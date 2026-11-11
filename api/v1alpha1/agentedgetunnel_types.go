@@ -101,6 +101,10 @@ type AgentEdgeTunnelStatus struct {
 	// AccessAppID is the Cloudflare Access application protecting the hostname.
 	// It is recorded as soon as it exists, for the same reason as TunnelID.
 	AccessAppID string `json:"accessAppID,omitempty"`
+	// AccessPolicyVerifiedAt is the last time the complete Access policy was verified.
+	AccessPolicyVerifiedAt *metav1.Time `json:"accessPolicyVerifiedAt,omitempty"`
+	// AccessPolicyNextCheckAt is the earliest time the operator should verify Access again.
+	AccessPolicyNextCheckAt *metav1.Time `json:"accessPolicyNextCheckAt,omitempty"`
 	// ConnectorReady is true when the cloudflared pod is connected to Cloudflare.
 	ConnectorReady bool `json:"connectorReady,omitempty"`
 	// SessionUID is the UID of the AgentSession the tunnel was bound to,
