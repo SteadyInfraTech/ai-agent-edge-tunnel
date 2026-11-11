@@ -264,10 +264,17 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, err)
 	quotaAdminClient, err := client.New(quotaAdmin.Config(), client.Options{Scheme: scheme})
 	require.NoError(t, err)
+	controllerUser, err := testEnv.AddUser(envtest.User{
+		Name:   "system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager",
+		Groups: []string{"system:serviceaccounts", "controller-test"},
+	}, cfg)
+	require.NoError(t, err)
+	controllerClient, err := client.New(controllerUser.Config(), client.Options{Scheme: scheme})
+	require.NoError(t, err)
 
 	quotaNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "quota-policy"}}
 	require.NoError(t, k8s.Create(ctx, quotaNamespace))
-	// Give both test identities real API permissions so the assertions below
+	// Give all test identities real API permissions so the assertions below
 	// exercise admission policy, not an RBAC denial.
 	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
@@ -287,6 +294,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		Subjects: []rbacv1.Subject{
 			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "tenant-users"},
 			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "quota-admins"},
+			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "controller-test"},
 		},
 	}))
 	quotaObject := func() *agentopsv1alpha1.NamespaceTunnelQuota {
@@ -322,6 +330,9 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.Error(t, tenantClient.Status().Update(ctx, &tenantView), "tenant users must not forge quota reservations")
 	require.Error(t, quotaAdminClient.Status().Update(ctx, &tenantView), "quota admins may manage limits but not the operator-owned reservation ledger")
 	require.NoError(t, k8s.Status().Update(ctx, &tenantView), "system:masters must retain break-glass status access")
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(quota), &tenantView))
+	tenantView.Status.Reservations = []agentopsv1alpha1.TunnelReservation{{Name: "controller", UID: "controller-uid"}}
+	require.NoError(t, controllerClient.Status().Update(ctx, &tenantView), "controller must be able to update quota status")
 	require.Error(t, tenantClient.Delete(ctx, quota), "tenant users must not delete namespace quotas")
 	// The failed delete must leave the quota in place; a configured admin can
 	// update and delete it.
