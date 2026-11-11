@@ -46,7 +46,7 @@ verification until that deadline, rather than issuing Access API reads on every 
 checks persist their verification time and next deadline in status.
 
 A Cloudflare HTTP 429 is treated as API-budget pressure, not proof of policy drift: the tunnel remains Active,
-the last verified state is retained and surfaced as a rate-limit warning, and verification is deferred for a
+the existing tunnel state is retained and surfaced as a rate-limit warning, and verification is deferred for a
 per-tunnel jittered 1-2 minute backoff. Other verification errors remain visible as unprotected and are retried by reconciliation;
 a confirmed policy mismatch still terminates the tunnel fail-closed.
 
