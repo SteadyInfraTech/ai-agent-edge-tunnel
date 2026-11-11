@@ -1406,6 +1406,11 @@ func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
 			require.NotEmpty(t, h.cf.DNSRecords)
 
 			mutate(h)
+			// Access policy verification is intentionally scheduled; advance the
+			// fake clock so this test exercises drift detection immediately.
+			current := h.get()
+			require.NotNil(t, current.Status.AccessPolicyNextCheckAt)
+			h.now = current.Status.AccessPolicyNextCheckAt.Time
 			_, err = h.reconcile()
 			require.NoError(t, err, "successful fail-closed cleanup should converge")
 			got := h.get()
