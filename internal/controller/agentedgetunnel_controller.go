@@ -39,12 +39,12 @@ var (
 )
 
 const (
-	serviceTargetGracePeriod   = 30 * time.Second
-	serviceTargetRetryInterval = 2 * time.Second
-	serviceTargetFailedRequeue = 10 * time.Second
-	accessPolicyVerificationBaseInterval = 5 * time.Minute
-	accessPolicyVerificationJitter = 5 * time.Minute
-	accessPolicyRateLimitBackoff = 1 * time.Minute
+	serviceTargetGracePeriod              = 30 * time.Second
+	serviceTargetRetryInterval            = 2 * time.Second
+	serviceTargetFailedRequeue            = 10 * time.Second
+	accessPolicyVerificationBaseInterval  = 5 * time.Minute
+	accessPolicyVerificationJitter        = 5 * time.Minute
+	accessPolicyRateLimitBackoff           = 1 * time.Minute
 )
 
 const (
