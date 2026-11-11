@@ -287,6 +287,8 @@ func TestActiveSessionTunnelStillVerifiesAccessWhenSessionCRDIsUnavailable(t *te
 		app.Emails = []string{"attacker@example.com"}
 		h.cf.AccessApps[active.Status.AccessAppID] = app
 
+		require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+		h.now = active.Status.AccessPolicyNextCheckAt.Time
 		h.r.Client = &missingAgentSessionKindClient{Client: h.k8s}
 		_, err = h.reconcile()
 		require.NoError(t, err)
@@ -299,6 +301,8 @@ func TestActiveSessionTunnelStillVerifiesAccessWhenSessionCRDIsUnavailable(t *te
 		_, err := h.reconcile()
 		require.NoError(t, err)
 		active := h.get()
+		require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+		h.now = active.Status.AccessPolicyNextCheckAt.Time
 		h.cf.FindAccessErr = errors.New("Cloudflare API temporarily unavailable")
 		h.r.Client = &missingAgentSessionKindClient{Client: h.k8s}
 
