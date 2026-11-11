@@ -1494,7 +1494,7 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	got = h.get()
 	assert.Equal(t, 2, h.cf.VerifyAccessCalls, "verification resumes after the backoff")
 	assert.Equal(t, h.now, got.Status.AccessPolicyVerifiedAt.Time)
-	assert.True(t, got.Status.AccessPolicyNextCheckAt.After(&metav1.Time{Time: h.now}))
+	assert.True(t, got.Status.AccessPolicyNextCheckAt.Time.After(h.now))
 	assert.NotContains(t, got.Status.Message, "rate-limited")
 }
 
