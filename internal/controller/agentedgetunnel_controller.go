@@ -737,7 +737,7 @@ func accessPolicyRateLimitDelay(t *agentopsv1alpha1.AgentEdgeTunnel) time.Durati
 func accessPolicyVerificationInterval(t *agentopsv1alpha1.AgentEdgeTunnel) time.Duration {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(t.Namespace + "/" + t.Name + "/" + string(t.UID)))
-	return accessPolicyVerificationBaseInterval + time.Duration(h.Sum64()%uint64(accessPolicyVerificationJitter))
+	return accessPolicyVerificationBaseInterval + time.Duration(h.Sum64()%uint64(accessPolicyVerificationJitter/time.Second))*time.Second
 }
 
 // recoverAccessApp looks for an Access application that an earlier attempt
