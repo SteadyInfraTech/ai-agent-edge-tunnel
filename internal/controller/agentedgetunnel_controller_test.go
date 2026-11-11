@@ -1544,6 +1544,27 @@ func TestInitialAccessRateLimitDoesNotRestoreConnector(t *testing.T) {
 	h.assertConnectorGone()
 }
 
+func TestActiveRequeueAfterPreservesLifecycleLimitsDuringAccessBackoff(t *testing.T) {
+	now := t0
+	deadline := metav1.NewTime(now.Add(90 * time.Second))
+	expires := metav1.NewTime(now.Add(5 * time.Second))
+	tunnel := &agentopsv1alpha1.AgentEdgeTunnel{
+		Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{},
+		Status: agentopsv1alpha1.AgentEdgeTunnelStatus{
+			AccessPolicyNextCheckAt: &deadline,
+			ExpiresAt:               &expires,
+		},
+	}
+	assert.Equal(t, 5*time.Second, activeRequeueAfter(tunnel, now), "TTL cleanup must run before Access retry")
+
+	tunnel.Status.ExpiresAt = nil
+	tunnel.Spec.SessionRef = &agentopsv1alpha1.SessionReference{Name: "session"}
+	assert.Equal(t, sessionPollInterval, activeRequeueAfter(tunnel, now), "session state must be polled before Access retry")
+
+	tunnel.Spec.SessionRef = nil
+	assert.Equal(t, maxRequeue, activeRequeueAfter(tunnel, now), "ordinary Active checks remain bounded by maxRequeue")
+}
+
 // TestAccessPolicyVerificationIntervalIsJittered ensures each tunnel receives
 // a stable interval in the five-to-ten-minute range.
 func TestAccessPolicyVerificationIntervalIsJittered(t *testing.T) {
