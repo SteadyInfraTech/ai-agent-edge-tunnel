@@ -1467,18 +1467,17 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
 	assert.Zero(t, h.cf.VerifyAccessCalls, "successful policy creation is the initial trusted verification")
 
-	// Simulate connector loss while the existing Access application is
-	// recorded. A verification 429 must not restore the connector from its
-	// retained credentials until policy verification succeeds.
-	deployment, err := h.deployment()
-	require.NoError(t, err)
-	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
-
 	firstCheck := active.Status.AccessPolicyNextCheckAt.Time
 	h.now = firstCheck.Add(-time.Second)
 	_, err = h.reconcile()
 	require.NoError(t, err)
 	assert.Zero(t, h.cf.VerifyAccessCalls, "reconciles before the deadline must not call Cloudflare")
+
+	// Simulate connector loss immediately before a due verification. A 429
+	// must not restore it from retained credentials.
+	deployment, err := h.deployment()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
 
 	h.now = firstCheck
 	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
