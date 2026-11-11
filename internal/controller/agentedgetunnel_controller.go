@@ -328,12 +328,23 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 	// say so loudly until it exists.
 	var accessErr error
 	accessRateLimited := false
-	if t.Status.AccessAppID != "" && len(t.Spec.Security.AllowedEmails) > 0 &&
-		t.Status.AccessPolicyNextCheckAt != nil && now.Before(t.Status.AccessPolicyNextCheckAt.Time) {
+	accessSetupRequired := len(t.Spec.Security.AllowedEmails) > 0 && t.Status.AccessAppID == ""
+	accessCheckDeferred := len(t.Spec.Security.AllowedEmails) > 0 &&
+		t.Status.AccessPolicyNextCheckAt != nil && now.Before(t.Status.AccessPolicyNextCheckAt.Time)
+	if accessCheckDeferred {
 		// Session tunnels may reconcile every 10 seconds. Reuse the last verified
 		// policy state until this tunnel's jittered verification deadline. Keep a
 		// prior 429 warning visible until a successful verification clears it.
 		accessRateLimited = strings.HasPrefix(t.Status.Message, "Access policy verification rate-limited")
+		if accessSetupRequired {
+			// A missing application is not a verified policy. Do not create or
+			// restore a connector while initial Access setup is rate-limited.
+			wait := t.Status.AccessPolicyNextCheckAt.Sub(now)
+			if wait < time.Second {
+				wait = time.Second
+			}
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
 	} else {
 		accessErr = r.ensureAccess(ctx, t)
 	}
@@ -355,6 +366,15 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 				return ctrl.Result{}, fmt.Errorf("recording Access verification rate limit: %w", uerr)
 			}
 			accessRateLimited = true
+			if accessSetupRequired {
+				// Retain the existing tunnel resources, but never provision or
+				// restore a connector until the required Access policy exists.
+				wait := next.Sub(now)
+				if wait < time.Second {
+					wait = time.Second
+				}
+				return ctrl.Result{RequeueAfter: wait}, nil
+			}
 		} else {
 			t.Status.Message = "UNPROTECTED: unable to verify Access policy: " + accessErr.Error()
 			if uerr := r.Status().Update(ctx, t); uerr != nil {
