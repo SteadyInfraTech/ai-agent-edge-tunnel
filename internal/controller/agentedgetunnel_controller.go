@@ -327,14 +327,16 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 	// under an older operator) is already reachable. Create the policy now and
 	// say so loudly until it exists.
 	var accessErr error
+	accessRateLimited := false
 	if t.Status.AccessAppID != "" && len(t.Spec.Security.AllowedEmails) > 0 &&
 		t.Status.AccessPolicyNextCheckAt != nil && now.Before(t.Status.AccessPolicyNextCheckAt.Time) {
 		// Session tunnels may reconcile every 10 seconds. Reuse the last verified
-		// policy state until this tunnel's jittered verification deadline.
+		// policy state until this tunnel's jittered verification deadline. Keep a
+		// prior 429 warning visible until a successful verification clears it.
+		accessRateLimited = strings.HasPrefix(t.Status.Message, "Access policy verification rate-limited")
 	} else {
 		accessErr = r.ensureAccess(ctx, t)
 	}
-	accessRateLimited := false
 	if accessErr != nil {
 		if errors.Is(accessErr, errAccessPolicyDrift) {
 			// A weakened or missing policy must never leave an Active hostname routable.
