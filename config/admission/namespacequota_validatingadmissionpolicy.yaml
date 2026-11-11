@@ -1,0 +1,24 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: edge-tunnel-quota-admin-policy
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [edge.steadyinfra.com]
+      apiVersions: [v1alpha1]
+      operations: [CREATE, UPDATE, DELETE]
+      resources: [namespacetunnelquotas]
+      scope: Namespaced
+  validations:
+  - expression: >-
+      request.userInfo.groups.exists(group,
+        group == 'system:masters' ||
+        (params != null &&
+         'EDGE_QUOTA_ADMIN_GROUPS' in params.data &&
+         params.data['EDGE_QUOTA_ADMIN_GROUPS'].split(',').exists(allowed, allowed.trim() == group)))
+    message: NamespaceTunnelQuota changes are restricted to system:masters or groups listed in EDGE_QUOTA_ADMIN_GROUPS

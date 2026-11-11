@@ -147,10 +147,19 @@ cleanup succeeds. A failed cleanup therefore retains both the finalizer and
 the quota slot for a later retry.
 
 The operator's RBAC grants it read access to quota specs and write access only
-to quota status. Restrict creation, updates, and deletion of `NamespaceTunnelQuota`
-objects to trusted namespace administrators: changing `spec.limit` is an
-administrative capacity decision. The namespaced installation grants these
-permissions only inside each configured managed namespace.
+to quota status. The default and namespaced installs apply two admission
+policies. The spec policy restricts quota `CREATE`, `UPDATE`, and `DELETE` to
+members of `system:masters` or groups listed in the optional comma-separated
+`EDGE_QUOTA_ADMIN_GROUPS` ConfigMap key. If the key is unset, only
+`system:masters` is authorized. Its binding uses
+`parameterNotFoundAction: Deny`, so all quota spec changes are blocked while
+the ConfigMap is missing; restore it before managing quota objects.
+The separate status policy restricts updates to `namespacetunnelquotas/status`
+to the operator's `edge-tunnel-controller-manager` ServiceAccount and
+`system:masters`, independently of the ConfigMap. Configured quota-admin
+groups can manage `spec.limit` but cannot forge or remove reservations.
+Changing `spec.limit` is an administrative capacity decision; do not grant
+quota write permissions to tenant roles even with these policies installed.
 
 ## Project Structure
 
@@ -191,6 +200,7 @@ permissions only inside each configured managed namespace.
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | Required. The operator exits at startup if either is missing. The token needs Tunnel, DNS and Access edit permissions. |
 | `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_ZONE_NAME` | Required. Pins this operator instance to one Cloudflare zone; the base domain must be the zone apex or one of its subdomains, and each object's `spec.cloudflare.zoneID` must match. |
 | `EDGE_PUBLIC_NAMESPACES` | Optional comma-separated namespace allowlist for `security.allowPublic: true`. Empty or unset denies public tunnels in every namespace. |
+| `EDGE_QUOTA_ADMIN_GROUPS` | Optional comma-separated Kubernetes groups authorized to manage `NamespaceTunnelQuota` objects. `system:masters` is authorized while the policy ConfigMap is available. |
 | `--base-domain` / `EDGE_BASE_DOMAIN` | Required. Hostnames are `<subdomain>.<base-domain>`. |
 | `--connector-image` / `CONNECTOR_IMAGE` | Required. The cloudflared image; pin a version or digest. |
 | `--leader-elect` | Enable when running more than one replica. |
@@ -210,7 +220,8 @@ kubectl -n edge-tunnel-system create configmap edge-tunnel-config \
   --from-literal=CLOUDFLARE_ZONE_ID=<zone-id> \
   --from-literal=CLOUDFLARE_ZONE_NAME=example.com \
   --from-literal=CONNECTOR_IMAGE=<pinned cloudflared image> \
-  --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public
+  --from-literal=EDGE_PUBLIC_NAMESPACES=agent-public \
+  --from-literal=EDGE_QUOTA_ADMIN_GROUPS=platform-admins
 make docker-build IMG=<your-registry>/ai-agent-edge-tunnel:<tag>   # and push it
 make deploy IMG=<your-registry>/ai-agent-edge-tunnel:<tag>        # needs the kustomize CLI
 kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml

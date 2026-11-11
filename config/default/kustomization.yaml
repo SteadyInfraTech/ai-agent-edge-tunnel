@@ -2,7 +2,7 @@
 #
 # Before applying, create the Cloudflare credentials Secret and set
 # the edge-tunnel-config ConfigMap with EDGE_BASE_DOMAIN, CLOUDFLARE_ZONE_ID,
-# CLOUDFLARE_ZONE_NAME, CONNECTOR_IMAGE, and (optionally) EDGE_PUBLIC_NAMESPACES.
+# CLOUDFLARE_ZONE_NAME, CONNECTOR_IMAGE, and optional EDGE_PUBLIC_NAMESPACES / EDGE_QUOTA_ADMIN_GROUPS.
 # The admission policy reads this ConfigMap and fails closed if it is missing.
 namespace: edge-tunnel-system
 resources:

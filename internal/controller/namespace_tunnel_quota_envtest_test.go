@@ -14,6 +14,7 @@ import (
 	agentopsv1alpha1 "github.com/SteadyInfraTech/ai-agent-edge-tunnel/api/v1alpha1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -194,6 +195,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
 	require.NoError(t, agentopsv1alpha1.AddToScheme(scheme))
 	k8s, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
@@ -206,10 +208,11 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	params := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
-			"CLOUDFLARE_ZONE_ID":     "zone-123",
-			"CLOUDFLARE_ZONE_NAME":   "example.com",
-			"EDGE_BASE_DOMAIN":       "agents.example.com",
-			"EDGE_PUBLIC_NAMESPACES": "allowed-public, another-public",
+			"CLOUDFLARE_ZONE_ID":      "zone-123",
+			"CLOUDFLARE_ZONE_NAME":    "example.com",
+			"EDGE_BASE_DOMAIN":        "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES":  "allowed-public, another-public",
+			"EDGE_QUOTA_ADMIN_GROUPS": "quota-admins",
 		},
 	}
 	require.NoError(t, k8s.Create(ctx, params))
@@ -225,6 +228,159 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	var binding admissionregistrationv1.ValidatingAdmissionPolicyBinding
 	require.NoError(t, yaml.Unmarshal(bindingYAML, &binding))
 	require.NoError(t, k8s.Create(ctx, &binding))
+
+	quotaPolicyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_validatingadmissionpolicy.yaml"))
+	require.NoError(t, err)
+	var quotaPolicy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.Unmarshal(quotaPolicyYAML, &quotaPolicy))
+	require.NoError(t, k8s.Create(ctx, &quotaPolicy))
+
+	quotaBindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_validatingadmissionpolicybinding.yaml"))
+	require.NoError(t, err)
+	var quotaBinding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	require.NoError(t, yaml.Unmarshal(quotaBindingYAML, &quotaBinding))
+	require.NoError(t, k8s.Create(ctx, &quotaBinding))
+
+	quotaStatusPolicyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_status_validatingadmissionpolicy.yaml"))
+	require.NoError(t, err)
+	var quotaStatusPolicy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.Unmarshal(quotaStatusPolicyYAML, &quotaStatusPolicy))
+	require.NoError(t, k8s.Create(ctx, &quotaStatusPolicy))
+
+	quotaStatusBindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_status_validatingadmissionpolicybinding.yaml"))
+	require.NoError(t, err)
+	var quotaStatusBinding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	require.NoError(t, yaml.Unmarshal(quotaStatusBindingYAML, &quotaStatusBinding))
+	require.NoError(t, k8s.Create(ctx, &quotaStatusBinding))
+
+	// Namespace quota limits are an administrative capacity decision. A
+	// tenant with broad custom-resource write access must not be able to
+	// create, raise, or remove its own quota. Configured admin groups can.
+	tenantUser, err := testEnv.AddUser(envtest.User{Name: "quota-tenant", Groups: []string{"tenant-users"}}, cfg)
+	require.NoError(t, err)
+	tenantClient, err := client.New(tenantUser.Config(), client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	quotaAdmin, err := testEnv.AddUser(envtest.User{Name: "quota-admin", Groups: []string{"quota-admins"}}, cfg)
+	require.NoError(t, err)
+	quotaAdminClient, err := client.New(quotaAdmin.Config(), client.Options{Scheme: scheme})
+	require.NoError(t, err)
+	controllerUser, err := testEnv.AddUser(envtest.User{
+		Name:   "system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager",
+		Groups: []string{"system:serviceaccounts", "controller-test"},
+	}, cfg)
+	require.NoError(t, err)
+	controllerClient, err := client.New(controllerUser.Config(), client.Options{Scheme: scheme})
+	require.NoError(t, err)
+
+	quotaNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "quota-policy"}}
+	require.NoError(t, k8s.Create(ctx, quotaNamespace))
+	// Give all test identities real API permissions so the assertions below
+	// exercise admission policy, not an RBAC denial.
+	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{"edge.steadyinfra.com"},
+			Resources: []string{"namespacetunnelquotas", "namespacetunnelquotas/status"},
+			Verbs:     []string{"get", "list", "create", "update", "patch", "delete"},
+		}},
+	}))
+	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "quota-policy-test",
+		},
+		Subjects: []rbacv1.Subject{
+			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "tenant-users"},
+			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "quota-admins"},
+			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "controller-test"},
+		},
+	}))
+	quotaObject := func() *agentopsv1alpha1.NamespaceTunnelQuota {
+		return &agentopsv1alpha1.NamespaceTunnelQuota{
+			ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "quota-policy"},
+			Spec:       agentopsv1alpha1.NamespaceTunnelQuotaSpec{Limit: 1},
+		}
+	}
+	quotaCreateDenied := false
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		attempt := quotaObject()
+		createErr := tenantClient.Create(ctx, attempt)
+		if apierrors.IsForbidden(createErr) || apierrors.IsInvalid(createErr) {
+			quotaCreateDenied = true
+			break
+		}
+		if createErr != nil {
+			t.Fatalf("unexpected error while waiting for quota admin policy: %v", createErr)
+		}
+		require.NoError(t, k8s.Delete(ctx, attempt), "remove quota admitted before policy activation")
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, quotaCreateDenied, "tenant users must not create namespace quota objects")
+
+	quota := quotaObject()
+	require.NoError(t, quotaAdminClient.Create(ctx, quota), "configured quota admin group should create quotas")
+	var tenantView agentopsv1alpha1.NamespaceTunnelQuota
+	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(quota), &tenantView))
+	tenantView.Spec.Limit = 1000
+	require.Error(t, tenantClient.Update(ctx, &tenantView), "tenant users must not raise their own quota")
+	tenantView.Status.Reservations = []agentopsv1alpha1.TunnelReservation{{Name: "forged", UID: "forged-uid"}}
+	require.Error(t, tenantClient.Status().Update(ctx, &tenantView), "tenant users must not forge quota reservations")
+	require.Error(t, quotaAdminClient.Status().Update(ctx, &tenantView), "quota admins may manage limits but not the operator-owned reservation ledger")
+	require.NoError(t, k8s.Status().Update(ctx, &tenantView), "system:masters must retain break-glass status access")
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(quota), &tenantView))
+	tenantView.Status.Reservations = []agentopsv1alpha1.TunnelReservation{{Name: "controller", UID: "controller-uid"}}
+	require.NoError(t, controllerClient.Status().Update(ctx, &tenantView), "controller must be able to update quota status")
+	require.Error(t, tenantClient.Delete(ctx, quota), "tenant users must not delete namespace quotas")
+	// The failed delete must leave the quota in place; a configured admin can
+	// update and delete it.
+	require.NoError(t, quotaAdminClient.Get(ctx, client.ObjectKeyFromObject(quota), quota))
+	quota.Spec.Limit = 2
+	require.NoError(t, quotaAdminClient.Update(ctx, quota))
+	require.NoError(t, quotaAdminClient.Delete(ctx, quota))
+
+	statusRecoveryQuota := quotaObject()
+	require.NoError(t, quotaAdminClient.Create(ctx, statusRecoveryQuota))
+
+	// Missing policy parameters deny quota spec operations for every identity,
+	// including cluster administrators. Restore the ConfigMap before changing
+	// quotas; the separate status policy remains available for recovery.
+	require.NoError(t, k8s.Delete(ctx, params))
+	missingParamsDenied := false
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		probe := quotaObject()
+		createErr := k8s.Create(ctx, probe)
+		if apierrors.IsForbidden(createErr) || apierrors.IsInvalid(createErr) {
+			missingParamsDenied = true
+			break
+		}
+		if createErr != nil {
+			t.Fatalf("unexpected error while waiting for missing quota policy parameters: %v", createErr)
+		}
+		require.NoError(t, k8s.Delete(ctx, probe), "remove a probe admitted before missing parameters take effect")
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.True(t, missingParamsDenied, "quota spec changes must fail closed for all users when policy parameters are missing")
+	require.Error(t, tenantClient.Create(ctx, quotaObject()), "tenant groups must remain denied when policy parameters are missing")
+	statusRecoveryQuota.Status.Reservations = []agentopsv1alpha1.TunnelReservation{{Name: "status-recovery", UID: "status-recovery-uid"}}
+	require.NoError(t, k8s.Status().Update(ctx, statusRecoveryQuota), "the independent status policy must allow cluster-admin recovery without the ConfigMap")
+	require.Error(t, k8s.Delete(ctx, statusRecoveryQuota), "the spec policy must continue blocking quota deletion without the ConfigMap")
+	params = &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
+		Data: map[string]string{
+			"CLOUDFLARE_ZONE_ID":      "zone-123",
+			"CLOUDFLARE_ZONE_NAME":    "example.com",
+			"EDGE_BASE_DOMAIN":        "agents.example.com",
+			"EDGE_PUBLIC_NAMESPACES":  "allowed-public, another-public",
+			"EDGE_QUOTA_ADMIN_GROUPS": "quota-admins",
+		},
+	}
+	require.NoError(t, k8s.Create(ctx, params))
+	require.NoError(t, quotaAdminClient.Get(ctx, client.ObjectKeyFromObject(statusRecoveryQuota), statusRecoveryQuota))
+	require.NoError(t, quotaAdminClient.Delete(ctx, statusRecoveryQuota), "quota spec management should resume after restoring the ConfigMap")
 
 	// The API server may need a short interval to observe the policy and binding.
 	// Probe enforcement itself instead of depending on status controllers that
@@ -280,7 +436,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	// normalize it identically rather than rejecting otherwise-valid tenants.
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
 	require.NoError(t, k8s.Update(ctx, params))
-	deadline := time.Now().Add(15 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		probe := newTunnel("restricted", fmt.Sprintf("leading-dot-zone-probe-%d", time.Now().UnixNano()), "zone-123", false)
 		err := k8s.Create(ctx, probe)
