@@ -1480,7 +1480,15 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	assert.Equal(t, 1, h.cf.VerifyAccessCalls)
 
 	h.cf.FindAccessErr = nil
-	h.now = got.Status.AccessPolicyNextCheckAt.Time
+	retryAt := got.Status.AccessPolicyNextCheckAt.Time
+	h.now = retryAt.Add(-time.Second)
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	got = h.get()
+	assert.Contains(t, got.Status.Message, "rate-limited", "the warning remains until a successful verification")
+	assert.Equal(t, 1, h.cf.VerifyAccessCalls, "reconciles during backoff must not call Cloudflare")
+
+	h.now = retryAt
 	_, err = h.reconcile()
 	require.NoError(t, err)
 	got = h.get()
