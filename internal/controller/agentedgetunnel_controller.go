@@ -313,6 +313,31 @@ func (r *AgentEdgeTunnelReconciler) patchFinalizers(ctx context.Context, t, orig
 
 // reconcileActive handles an Active object: it cleans up once the TTL has
 // passed and otherwise requeues for the expiry.
+// activeRequeueAfter bounds Active reconciles by the normal lifecycle cadence
+// and any earlier Access verification deadline. In particular, Access setup
+// backoff must not postpone TTL cleanup or session polling.
+func activeRequeueAfter(t *agentopsv1alpha1.AgentEdgeTunnel, now time.Time) time.Duration {
+	wait := maxRequeue
+	if t.Status.ExpiresAt != nil {
+		if until := t.Status.ExpiresAt.Sub(now); until < wait {
+			wait = until
+		}
+	}
+	if t.Spec.SessionRef != nil && wait > sessionPollInterval {
+		wait = sessionPollInterval
+	}
+	if t.Status.AccessPolicyNextCheckAt != nil {
+		untilAccessCheck := t.Status.AccessPolicyNextCheckAt.Sub(now)
+		if untilAccessCheck > 0 && untilAccessCheck < wait {
+			wait = untilAccessCheck
+		}
+	}
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return wait
+}
+
 func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (ctrl.Result, error) {
 	now := r.now()
 	if t.Status.ExpiresAt != nil && !now.Before(t.Status.ExpiresAt.Time) {
@@ -339,11 +364,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		if accessSetupRequired {
 			// A missing application is not a verified policy. Do not create or
 			// restore a connector while initial Access setup is rate-limited.
-			wait := t.Status.AccessPolicyNextCheckAt.Sub(now)
-			if wait < time.Second {
-				wait = time.Second
-			}
-			return ctrl.Result{RequeueAfter: wait}, nil
+			return ctrl.Result{RequeueAfter: activeRequeueAfter(t, now)}, nil
 		}
 	} else {
 		accessErr = r.ensureAccess(ctx, t)
@@ -369,11 +390,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 			if accessSetupRequired {
 				// Retain the existing tunnel resources, but never provision or
 				// restore a connector until the required Access policy exists.
-				wait := next.Sub(now)
-				if wait < time.Second {
-					wait = time.Second
-				}
-				return ctrl.Result{RequeueAfter: wait}, nil
+				return ctrl.Result{RequeueAfter: activeRequeueAfter(t, now)}, nil
 			}
 		} else {
 			t.Status.Message = "UNPROTECTED: unable to verify Access policy: " + accessErr.Error()
@@ -407,25 +424,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		}
 	}
 
-	wait := maxRequeue
-	if t.Status.ExpiresAt != nil {
-		if until := t.Status.ExpiresAt.Sub(now); until < wait {
-			wait = until
-		}
-	}
-	if t.Spec.SessionRef != nil && wait > sessionPollInterval {
-		wait = sessionPollInterval
-	}
-	if t.Status.AccessPolicyNextCheckAt != nil {
-		untilAccessCheck := t.Status.AccessPolicyNextCheckAt.Sub(now)
-		if untilAccessCheck > 0 && untilAccessCheck < wait {
-			wait = untilAccessCheck
-		}
-	}
-	if wait < time.Second {
-		wait = time.Second
-	}
-	return ctrl.Result{RequeueAfter: wait}, nil
+	return ctrl.Result{RequeueAfter: activeRequeueAfter(t, now)}, nil
 }
 
 // terminate removes the Cloudflare resources and the connector, then marks the
