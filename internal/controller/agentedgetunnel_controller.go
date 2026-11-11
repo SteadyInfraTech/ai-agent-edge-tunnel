@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"strings"
 	"sync"
@@ -41,6 +42,9 @@ const (
 	serviceTargetGracePeriod   = 30 * time.Second
 	serviceTargetRetryInterval = 2 * time.Second
 	serviceTargetFailedRequeue = 10 * time.Second
+	accessPolicyVerificationBaseInterval = 5 * time.Minute
+	accessPolicyVerificationJitter = 5 * time.Minute
+	accessPolicyRateLimitBackoff = 1 * time.Minute
 )
 
 const (
@@ -322,17 +326,40 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 	// An object that became Active without an Access application (for example
 	// under an older operator) is already reachable. Create the policy now and
 	// say so loudly until it exists.
-	if err := r.ensureAccess(ctx, t); err != nil {
-		if errors.Is(err, errAccessPolicyDrift) {
+	var accessErr error
+	if t.Status.AccessAppID != "" && len(t.Spec.Security.AllowedEmails) > 0 &&
+		t.Status.AccessPolicyNextCheckAt != nil && now.Before(t.Status.AccessPolicyNextCheckAt.Time) {
+		// Session tunnels may reconcile every 10 seconds. Reuse the last verified
+		// policy state until this tunnel's jittered verification deadline.
+	} else {
+		accessErr = r.ensureAccess(ctx, t)
+	}
+	accessRateLimited := false
+	if accessErr != nil {
+		if errors.Is(accessErr, errAccessPolicyDrift) {
 			// A weakened or missing policy must never leave an Active hostname routable.
 			// Cleanup removes DNS first and retains the finalizer/status IDs on failure.
 			return ctrl.Result{}, r.terminate(ctx, t, "Cloudflare Access policy drift detected; tunnel removed to fail closed")
 		}
-		t.Status.Message = "UNPROTECTED: unable to verify Access policy: " + err.Error()
-		if uerr := r.Status().Update(ctx, t); uerr != nil {
-			log.FromContext(ctx).Error(uerr, "Failed to record Access policy verification error in status")
+		if cf.IsRateLimited(accessErr) {
+			// A 429 is an API-budget signal, not evidence that the policy changed.
+			// Retain the last verified state and defer the next read.
+			next := metav1.NewTime(now.Add(accessPolicyRateLimitBackoff))
+			if t.Status.AccessPolicyNextCheckAt == nil || t.Status.AccessPolicyNextCheckAt.Before(&next) {
+				t.Status.AccessPolicyNextCheckAt = &next
+			}
+			t.Status.Message = "Access policy verification rate-limited by Cloudflare; retaining the last verified policy state and retrying after backoff"
+			if uerr := r.Status().Update(ctx, t); uerr != nil {
+				return ctrl.Result{}, fmt.Errorf("recording Access verification rate limit: %w", uerr)
+			}
+			accessRateLimited = true
+		} else {
+			t.Status.Message = "UNPROTECTED: unable to verify Access policy: " + accessErr.Error()
+			if uerr := r.Status().Update(ctx, t); uerr != nil {
+				log.FromContext(ctx).Error(uerr, "Failed to record Access policy verification error in status")
+			}
+			return ctrl.Result{}, fmt.Errorf("protecting active tunnel: %w", accessErr)
 		}
-		return ctrl.Result{}, fmt.Errorf("protecting active tunnel: %w", err)
 	}
 
 	// Keep the connector in its desired state and reflect whether it is
@@ -346,7 +373,11 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		}
 		return ctrl.Result{}, fmt.Errorf("ensuring connector: %w", err)
 	}
-	if msg := statusMessage(t, ready); ready != t.Status.ConnectorReady || msg != t.Status.Message {
+	msg := statusMessage(t, ready)
+	if accessRateLimited {
+		msg = "Access policy verification rate-limited by Cloudflare; retaining the last verified policy state and retrying after backoff"
+	}
+	if ready != t.Status.ConnectorReady || msg != t.Status.Message {
 		t.Status.ConnectorReady = ready
 		t.Status.Message = msg
 		if err := r.Status().Update(ctx, t); err != nil {
@@ -362,6 +393,12 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 	}
 	if t.Spec.SessionRef != nil && wait > sessionPollInterval {
 		wait = sessionPollInterval
+	}
+	if t.Status.AccessPolicyNextCheckAt != nil {
+		untilAccessCheck := t.Status.AccessPolicyNextCheckAt.Sub(now)
+		if untilAccessCheck > 0 && untilAccessCheck < wait {
+			wait = untilAccessCheck
+		}
 	}
 	if wait < time.Second {
 		wait = time.Second
@@ -648,7 +685,7 @@ func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentop
 		if !matches {
 			return fmt.Errorf("%w: application %s for %s is missing or no longer matches the configured allowlist", errAccessPolicyDrift, t.Status.AccessAppID, t.Status.Hostname)
 		}
-		return nil
+		return r.recordAccessPolicyVerification(ctx, t)
 	}
 	appID, err := r.recoverAccessApp(ctx, t)
 	if err != nil {
@@ -661,6 +698,10 @@ func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentop
 		}
 	}
 	t.Status.AccessAppID = appID
+	verifiedAt := metav1.NewTime(r.now())
+	nextCheck := metav1.NewTime(r.now().Add(accessPolicyVerificationInterval(t)))
+	t.Status.AccessPolicyVerifiedAt = &verifiedAt
+	t.Status.AccessPolicyNextCheckAt = &nextCheck
 	if err := r.Status().Update(ctx, t); err != nil {
 		// Same reasoning as for the tunnel ID in provision: the error does not
 		// prove the write was rejected. Deleting the application could leave
@@ -670,6 +711,26 @@ func (r *AgentEdgeTunnelReconciler) ensureAccess(ctx context.Context, t *agentop
 		return err
 	}
 	return nil
+}
+
+// recordAccessPolicyVerification stores a successful full-policy check and a
+// per-tunnel jittered next-check deadline. The 5-10 minute interval prevents
+// short-lived session reconcile loops from multiplying Cloudflare API reads.
+func (r *AgentEdgeTunnelReconciler) recordAccessPolicyVerification(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	verifiedAt := metav1.NewTime(r.now())
+	nextCheck := metav1.NewTime(r.now().Add(accessPolicyVerificationInterval(t)))
+	t.Status.AccessPolicyVerifiedAt = &verifiedAt
+	t.Status.AccessPolicyNextCheckAt = &nextCheck
+	if err := r.Status().Update(ctx, t); err != nil {
+		return fmt.Errorf("recording Access policy verification time: %w", err)
+	}
+	return nil
+}
+
+func accessPolicyVerificationInterval(t *agentopsv1alpha1.AgentEdgeTunnel) time.Duration {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(t.Namespace + "/" + t.Name + "/" + string(t.UID)))
+	return accessPolicyVerificationBaseInterval + time.Duration(h.Sum64()%uint64(accessPolicyVerificationJitter))
 }
 
 // recoverAccessApp looks for an Access application that an earlier attempt
