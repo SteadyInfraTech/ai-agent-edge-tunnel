@@ -24,6 +24,7 @@ type Client struct {
 
 	CreateTunnelCalls int
 	CreateAccessCalls int
+	VerifyAccessCalls int
 
 	CreateTunnelErr error
 	CreateDNSErr    error
@@ -160,6 +161,7 @@ func (c *Client) FindTunnels(_ context.Context, name string) ([]cloudflare.Tunne
 func (c *Client) VerifyAccessPolicy(_ context.Context, _, appID, name, domain string, allowedEmails []string) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.VerifyAccessCalls++
 	if c.FindAccessErr != nil {
 		return false, c.FindAccessErr
 	}
