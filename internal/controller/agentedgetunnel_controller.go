@@ -387,11 +387,10 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 				return ctrl.Result{}, fmt.Errorf("recording Access verification rate limit: %w", uerr)
 			}
 			accessRateLimited = true
-			if accessSetupRequired {
-				// Retain the existing tunnel resources, but never provision or
-				// restore a connector until the required Access policy exists.
-				return ctrl.Result{RequeueAfter: activeRequeueAfter(t, now)}, nil
-			}
+			// Do not restore a missing connector while Access protection is
+			// unverified. Existing connector resources remain untouched; a
+			// later reconcile retries verification before restoring connectivity.
+			return ctrl.Result{RequeueAfter: activeRequeueAfter(t, now)}, nil
 		} else {
 			t.Status.Message = "UNPROTECTED: unable to verify Access policy: " + accessErr.Error()
 			if uerr := r.Status().Update(ctx, t); uerr != nil {
