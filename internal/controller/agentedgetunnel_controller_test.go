@@ -1475,7 +1475,7 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	assert.Contains(t, got.Status.Message, "rate-limited")
 	assert.Equal(t, active.Status.AccessPolicyVerifiedAt, got.Status.AccessPolicyVerifiedAt, "429 must preserve the last successful verification")
 	require.NotNil(t, got.Status.AccessPolicyNextCheckAt)
-	assert.Equal(t, h.now.Add(accessPolicyRateLimitBackoff), got.Status.AccessPolicyNextCheckAt.Time)
+	assert.Equal(t, h.now.Add(accessPolicyRateLimitDelay(&active)), got.Status.AccessPolicyNextCheckAt.Time)
 	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname], "the existing route remains intact")
 	assert.Equal(t, 1, h.cf.VerifyAccessCalls)
 
