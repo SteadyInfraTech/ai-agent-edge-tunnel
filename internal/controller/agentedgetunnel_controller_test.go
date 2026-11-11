@@ -1433,6 +1433,8 @@ func TestActiveTunnelKeepsResourcesWhenAccessVerificationFails(t *testing.T) {
 	require.Len(t, h.cf.Tunnels, 1)
 	require.Len(t, h.cf.AccessApps, 1)
 
+	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+	h.now = active.Status.AccessPolicyNextCheckAt.Time
 	h.cf.FindAccessErr = errors.New("Cloudflare API temporarily unavailable")
 	_, err = h.reconcile()
 	require.Error(t, err)
