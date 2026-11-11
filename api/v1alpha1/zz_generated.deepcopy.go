@@ -110,6 +110,14 @@ func (in *AgentEdgeTunnelStatus) DeepCopyInto(out *AgentEdgeTunnelStatus) {
 		in, out := &in.ExpiresAt, &out.ExpiresAt
 		*out = (*in).DeepCopy()
 	}
+	if in.AccessPolicyVerifiedAt != nil {
+		in, out := &in.AccessPolicyVerifiedAt, &out.AccessPolicyVerifiedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.AccessPolicyNextCheckAt != nil {
+		in, out := &in.AccessPolicyNextCheckAt, &out.AccessPolicyNextCheckAt
+		*out = (*in).DeepCopy()
+	}
 	if in.ServiceTargetVerificationSince != nil {
 		in, out := &in.ServiceTargetVerificationSince, &out.ServiceTargetVerificationSince
 		*out = (*in).DeepCopy()
