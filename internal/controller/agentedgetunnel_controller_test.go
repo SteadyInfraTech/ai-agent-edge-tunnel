@@ -1467,6 +1467,13 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
 	assert.Zero(t, h.cf.VerifyAccessCalls, "successful policy creation is the initial trusted verification")
 
+	// Simulate connector loss while the existing Access application is
+	// recorded. A verification 429 must not restore the connector from its
+	// retained credentials until policy verification succeeds.
+	deployment, err := h.deployment()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
+
 	firstCheck := active.Status.AccessPolicyNextCheckAt.Time
 	h.now = firstCheck.Add(-time.Second)
 	_, err = h.reconcile()
@@ -1484,6 +1491,8 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	require.NotNil(t, got.Status.AccessPolicyNextCheckAt)
 	assert.Equal(t, h.now.Add(accessPolicyRateLimitDelay(&active)).Truncate(time.Second), got.Status.AccessPolicyNextCheckAt.Time)
 	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname], "the existing route remains intact")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "a missing connector must not be restored while Access verification is rate-limited")
 	assert.Equal(t, 1, h.cf.VerifyAccessCalls)
 
 	h.cf.FindAccessErr = nil
@@ -1494,6 +1503,8 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	got = h.get()
 	assert.Contains(t, got.Status.Message, "rate-limited", "the warning remains until a successful verification")
 	assert.Equal(t, 1, h.cf.VerifyAccessCalls, "reconciles during backoff must not call Cloudflare")
+	_, deploymentErr = h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "backoff reconciles must not restore the connector")
 
 	h.now = retryAt
 	_, err = h.reconcile()
