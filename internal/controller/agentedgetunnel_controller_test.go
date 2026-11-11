@@ -1477,7 +1477,7 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	assert.Contains(t, got.Status.Message, "rate-limited")
 	assert.Equal(t, active.Status.AccessPolicyVerifiedAt, got.Status.AccessPolicyVerifiedAt, "429 must preserve the last successful verification")
 	require.NotNil(t, got.Status.AccessPolicyNextCheckAt)
-	assert.Equal(t, h.now.Add(accessPolicyRateLimitDelay(&active)), got.Status.AccessPolicyNextCheckAt.Time)
+	assert.Equal(t, h.now.Add(accessPolicyRateLimitDelay(&active)).Truncate(time.Second), got.Status.AccessPolicyNextCheckAt.Time)
 	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname], "the existing route remains intact")
 	assert.Equal(t, 1, h.cf.VerifyAccessCalls)
 
@@ -1498,6 +1498,45 @@ func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
 	assert.Equal(t, h.now, got.Status.AccessPolicyVerifiedAt.Time)
 	assert.True(t, got.Status.AccessPolicyNextCheckAt.Time.After(h.now))
 	assert.NotContains(t, got.Status.Message, "rate-limited")
+}
+
+// TestInitialAccessRateLimitDoesNotRestoreConnector ensures an Active legacy
+// tunnel without a recorded Access application cannot recreate its connector
+// while initial Access setup is rate-limited.
+func TestInitialAccessRateLimitDoesNotRestoreConnector(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	require.Equal(t, agentopsv1alpha1.PhaseActive, active.Status.Phase)
+	require.NotEmpty(t, active.Status.AccessAppID)
+
+	// Model an older/incomplete Active object and a missing connector.
+	active.Status.AccessAppID = ""
+	active.Status.AccessPolicyNextCheckAt = nil
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &active))
+	deployment, err := h.deployment()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
+	secret, err := h.secret()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), secret))
+
+	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	require.Greater(t, res.RequeueAfter, time.Duration(0))
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
+	assert.Empty(t, got.Status.AccessAppID)
+	assert.Contains(t, got.Status.Message, "rate-limited")
+	h.assertConnectorGone()
+
+	// Reconciliation during backoff must not bypass the deadline or restore
+	// the connector before the Access application has been established.
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	h.assertConnectorGone()
 }
 
 // TestAccessPolicyVerificationIntervalIsJittered ensures each tunnel receives
