@@ -344,7 +344,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		if cf.IsRateLimited(accessErr) {
 			// A 429 is an API-budget signal, not evidence that the policy changed.
 			// Retain the last verified state and defer the next read.
-			next := metav1.NewTime(now.Add(accessPolicyRateLimitBackoff))
+			next := metav1.NewTime(now.Add(accessPolicyRateLimitDelay(t)))
 			if t.Status.AccessPolicyNextCheckAt == nil || t.Status.AccessPolicyNextCheckAt.Before(&next) {
 				t.Status.AccessPolicyNextCheckAt = &next
 			}
@@ -725,6 +725,11 @@ func (r *AgentEdgeTunnelReconciler) recordAccessPolicyVerification(ctx context.C
 		return fmt.Errorf("recording Access policy verification time: %w", err)
 	}
 	return nil
+}
+
+func accessPolicyRateLimitDelay(t *agentopsv1alpha1.AgentEdgeTunnel) time.Duration {
+	jitter := (accessPolicyVerificationInterval(t) - accessPolicyVerificationBaseInterval) % time.Minute
+	return accessPolicyRateLimitBackoff + jitter
 }
 
 func accessPolicyVerificationInterval(t *agentopsv1alpha1.AgentEdgeTunnel) time.Duration {
