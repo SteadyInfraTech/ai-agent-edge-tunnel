@@ -350,7 +350,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 			if t.Status.AccessPolicyNextCheckAt == nil || t.Status.AccessPolicyNextCheckAt.Before(&next) {
 				t.Status.AccessPolicyNextCheckAt = &next
 			}
-			t.Status.Message = "Access policy verification rate-limited by Cloudflare; retaining the last verified policy state and retrying after backoff"
+			t.Status.Message = "Access policy verification rate-limited by Cloudflare; retaining the existing tunnel state and retrying after backoff"
 			if uerr := r.Status().Update(ctx, t); uerr != nil {
 				return ctrl.Result{}, fmt.Errorf("recording Access verification rate limit: %w", uerr)
 			}
@@ -377,7 +377,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 	}
 	msg := statusMessage(t, ready)
 	if accessRateLimited {
-		msg = "Access policy verification rate-limited by Cloudflare; retaining the last verified policy state and retrying after backoff"
+		msg = "Access policy verification rate-limited by Cloudflare; retaining the existing tunnel state and retrying after backoff"
 	}
 	if ready != t.Status.ConnectorReady || msg != t.Status.Message {
 		t.Status.ConnectorReady = ready
