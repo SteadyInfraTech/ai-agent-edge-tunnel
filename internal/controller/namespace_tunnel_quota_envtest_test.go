@@ -523,12 +523,6 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.True(t, createDenied, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
 
-	// Tenant users cannot use the exception to remove the controller's finalizer.
-	var tenantTerminating agentopsv1alpha1.AgentEdgeTunnel
-	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(terminating), &tenantTerminating))
-	tenantTerminating.Finalizers = nil
-	require.Error(t, tenantClient.Update(ctx, &tenantTerminating), "tenant users must not remove controller finalizers")
-
 	// Only the controller identity may change finalizers. The parameter-free
 	// policy keeps this authorization available while zone parameters are absent.
 	var tenantTerminating agentopsv1alpha1.AgentEdgeTunnel
