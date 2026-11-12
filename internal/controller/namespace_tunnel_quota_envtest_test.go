@@ -304,6 +304,23 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "controller-test"},
 		},
 	}))
+	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-controller-finalizers"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{"edge.steadyinfra.com"},
+			Resources: []string{"agentedgetunnels/finalizers"},
+			Verbs:     []string{"update"},
+		}},
+	}))
+	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-controller-finalizers"},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "quota-policy-controller-finalizers",
+		},
+		Subjects: []rbacv1.Subject{{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "controller-test"}},
+	}))
 	quotaObject := func() *agentopsv1alpha1.NamespaceTunnelQuota {
 		return &agentopsv1alpha1.NamespaceTunnelQuota{
 			ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "quota-policy"},
@@ -535,10 +552,10 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminating), &controllerTerminating))
 	controllerTerminating.Finalizers = nil
 	controllerTerminating.Spec.Cloudflare.ZoneID = "attacker-zone"
-	require.Error(t, controllerClient.Update(ctx, &controllerTerminating), "finalizer removal must not bypass spec validation")
+	require.Error(t, controllerClient.Update(ctx, &controllerTerminating), "ordinary controller updates must remain fail-closed when parameters are missing")
 	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminating), &controllerTerminating))
 	controllerTerminating.Finalizers = nil
-	require.NoError(t, controllerClient.Update(ctx, &controllerTerminating), "controller finalizer removal must recover when parameters are missing")
+	require.NoError(t, controllerClient.SubResource("finalizers").Update(ctx, &controllerTerminating), "controller finalizer subresource must recover when parameters are missing")
 
 	// Restore the ConfigMap with an invalid zone ID and verify the same narrow
 	// exception works without permitting tenant finalizer removal.
@@ -561,5 +578,5 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	var controllerInvalid agentopsv1alpha1.AgentEdgeTunnel
 	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminatingInvalid), &controllerInvalid))
 	controllerInvalid.Finalizers = nil
-	require.NoError(t, controllerClient.Update(ctx, &controllerInvalid), "controller finalizer removal must work with invalid policy parameters")
+	require.NoError(t, controllerClient.SubResource("finalizers").Update(ctx, &controllerInvalid), "controller finalizer subresource must work with invalid policy parameters")
 }
