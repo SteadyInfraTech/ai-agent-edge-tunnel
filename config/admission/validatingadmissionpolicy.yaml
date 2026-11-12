@@ -14,32 +14,36 @@ spec:
       operations: [CREATE, UPDATE]
       resources: [agentedgetunnels]
       scope: Namespaced
+  # Skip this parameterized policy only for the controller's exact finalizer
+  # removal operation. The binding can therefore keep parameterNotFoundAction: Deny.
+  matchConditions:
+  - name: skip-controller-finalizer-removal
+    expression: >-
+      !(
+  request.operation == 'UPDATE' &&
+  (
+    request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
+    request.userInfo.groups.exists(group, group == 'system:masters')
+  ) &&
+  has(oldObject.metadata.deletionTimestamp) &&
+  oldObject.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup') &&
+  (!has(object.metadata.finalizers) ||
+   !object.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup')) &&
+  oldObject.metadata.finalizers.filter(f, f != 'edge.steadyinfra.com/tunnel-cleanup').size() ==
+    (has(object.metadata.finalizers) ? object.metadata.finalizers.size() : 0) &&
+  (!has(object.metadata.finalizers) ||
+   object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(old, old == f))) &&
+  object.spec == oldObject.spec &&
+  object.metadata.labels == oldObject.metadata.labels &&
+  object.metadata.annotations == oldObject.metadata.annotations &&
+  object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
+  object.metadata.name == oldObject.metadata.name &&
+  object.metadata.namespace == oldObject.metadata.namespace &&
+  object.metadata.uid == oldObject.metadata.uid &&
+  object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp
+)
   validations:
   - expression: >-
-      (
-      request.operation == 'UPDATE' &&
-      (
-        request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
-        request.userInfo.groups.exists(group, group == 'system:masters')
-      ) &&
-      has(oldObject.metadata.deletionTimestamp) &&
-      oldObject.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup') &&
-      (!has(object.metadata.finalizers) ||
-       !object.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup')) &&
-      oldObject.metadata.finalizers.filter(f, f != 'edge.steadyinfra.com/tunnel-cleanup').size() ==
-        (has(object.metadata.finalizers) ? object.metadata.finalizers.size() : 0) &&
-      (!has(object.metadata.finalizers) ||
-       object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(old, old == f))) &&
-      object.spec == oldObject.spec &&
-      object.metadata.labels == oldObject.metadata.labels &&
-      object.metadata.annotations == oldObject.metadata.annotations &&
-      object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
-      object.metadata.name == oldObject.metadata.name &&
-      object.metadata.namespace == oldObject.metadata.namespace &&
-      object.metadata.uid == oldObject.metadata.uid &&
-      object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp
-    ) ||
-      (
       params != null &&
       params.data['CLOUDFLARE_ZONE_ID'] != '' &&
       object.spec.cloudflare.zoneID == params.data['CLOUDFLARE_ZONE_ID'] &&
@@ -52,39 +56,13 @@ spec:
        (params.data['EDGE_BASE_DOMAIN'].startsWith('.') ?
         params.data['EDGE_BASE_DOMAIN'].substring(1) : params.data['EDGE_BASE_DOMAIN']).endsWith('.' +
         (params.data['CLOUDFLARE_ZONE_NAME'].startsWith('.') ?
-         params.data['CLOUDFLARE_ZONE_NAME'].substring(1) : params.data['CLOUDFLARE_ZONE_NAME']))
-      )
+         params.data['CLOUDFLARE_ZONE_NAME'].substring(1) : params.data['CLOUDFLARE_ZONE_NAME'])))
     message: spec.cloudflare.zoneID must match the configured Cloudflare zone for EDGE_BASE_DOMAIN
   - expression: >-
-      (
-      request.operation == 'UPDATE' &&
-      (
-        request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
-        request.userInfo.groups.exists(group, group == 'system:masters')
-      ) &&
-      has(oldObject.metadata.deletionTimestamp) &&
-      oldObject.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup') &&
-      (!has(object.metadata.finalizers) ||
-       !object.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup')) &&
-      oldObject.metadata.finalizers.filter(f, f != 'edge.steadyinfra.com/tunnel-cleanup').size() ==
-        (has(object.metadata.finalizers) ? object.metadata.finalizers.size() : 0) &&
-      (!has(object.metadata.finalizers) ||
-       object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(old, old == f))) &&
-      object.spec == oldObject.spec &&
-      object.metadata.labels == oldObject.metadata.labels &&
-      object.metadata.annotations == oldObject.metadata.annotations &&
-      object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
-      object.metadata.name == oldObject.metadata.name &&
-      object.metadata.namespace == oldObject.metadata.namespace &&
-      object.metadata.uid == oldObject.metadata.uid &&
-      object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp
-    ) ||
-      (
       params != null && (
       !has(object.spec.security) ||
       !has(object.spec.security.allowPublic) ||
       !object.spec.security.allowPublic ||
       ('EDGE_PUBLIC_NAMESPACES' in params.data &&
        params.data['EDGE_PUBLIC_NAMESPACES'].split(',').exists(ns, ns.trim() == request.namespace)))
-      )
     message: security.allowPublic is permitted only in namespaces listed in EDGE_PUBLIC_NAMESPACES
