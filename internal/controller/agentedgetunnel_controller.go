@@ -312,7 +312,7 @@ func (r *AgentEdgeTunnelReconciler) patchFinalizers(ctx context.Context, t, orig
 	// intentionally matches the main resource only, while RBAC grants this subresource
 	// exclusively to the controller. This keeps cleanup available if policy params vanish
 	// without weakening fail-closed validation for ordinary resource updates.
-	return r.SubResource("finalizers").Patch(ctx, t, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
+	return r.SubResource("finalizers").Update(ctx, t)
 }
 
 // reconcileActive handles an Active object: it cleans up once the TTL has
