@@ -279,17 +279,17 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
 		Rules: []rbacv1.PolicyRule{
-		{
-			APIGroups: []string{"edge.steadyinfra.com"},
-			Resources: []string{"namespacetunnelquotas", "namespacetunnelquotas/status"},
-			Verbs:     []string{"get", "list", "create", "update", "patch", "delete"},
+			{
+				APIGroups: []string{"edge.steadyinfra.com"},
+				Resources: []string{"namespacetunnelquotas", "namespacetunnelquotas/status"},
+				Verbs:     []string{"get", "list", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"edge.steadyinfra.com"},
+				Resources: []string{"agentedgetunnels"},
+				Verbs:     []string{"get", "update", "patch"},
+			},
 		},
-		{
-			APIGroups: []string{"edge.steadyinfra.com"},
-			Resources: []string{"agentedgetunnels"},
-			Verbs:     []string{"get", "update", "patch"},
-		},
-	},
 	}))
 	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
