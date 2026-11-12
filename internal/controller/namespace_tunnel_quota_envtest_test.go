@@ -597,7 +597,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 		{name: "orphan", propagation: metav1.DeletePropagationOrphan, gcFinalizer: "orphan"},
 	} {
 		t.Run("garbage-collector-"+testCase.name, func(t *testing.T) {
-			object := newTunnel("restricted", "gc-"+testCase.name, "zone-123", false)
+			object := newTunnel("restricted", "gc-"+testCase.name, "different-zone", false)
 			object.Finalizers = []string{FinalizerName, testCase.gcFinalizer}
 			require.NoError(t, k8s.Create(ctx, object))
 			require.NoError(t, k8s.Delete(ctx, object, &client.DeleteOptions{PropagationPolicy: &testCase.propagation}))
