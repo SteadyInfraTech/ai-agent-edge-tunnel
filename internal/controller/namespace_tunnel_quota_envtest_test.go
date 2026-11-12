@@ -555,7 +555,12 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.Error(t, controllerClient.Update(ctx, &controllerTerminating), "ordinary controller updates must remain fail-closed when parameters are missing")
 	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminating), &controllerTerminating))
 	controllerTerminating.Finalizers = nil
-	require.NoError(t, controllerClient.SubResource("finalizers").Update(ctx, &controllerTerminating), "controller finalizer subresource must recover when parameters are missing")
+	finalizerErr := controllerClient.SubResource("finalizers").Update(ctx, &controllerTerminating)
+	require.True(t, finalizerErr == nil || apierrors.IsNotFound(finalizerErr),
+		"controller finalizer subresource must remove the finalizer when parameters are missing: %v", finalizerErr)
+	var deletedAfterFinalizer agentopsv1alpha1.AgentEdgeTunnel
+	require.True(t, apierrors.IsNotFound(k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &deletedAfterFinalizer)),
+		"removing the last finalizer must complete deletion")
 
 	// Restore the ConfigMap with an invalid zone ID and verify the same narrow
 	// exception works without permitting tenant finalizer removal.
