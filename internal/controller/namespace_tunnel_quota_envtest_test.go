@@ -283,12 +283,12 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, err)
 	controllerClient, err := client.New(controllerUser.Config(), client.Options{Scheme: scheme})
 	require.NoError(t, err)
-	// kubeadm and kind run kube-controller-manager with the client certificate
-	// identity system:kube-controller-manager; the garbage collector uses that
-	// controller-manager client. Model that authenticated identity explicitly.
+	// kubeadm (and therefore the kind test cluster) enables per-controller
+	// service-account credentials. The generic garbage collector authenticates
+	// as system:serviceaccount:kube-system:generic-garbage-collector.
 	gcUser, err := testEnv.AddUser(envtest.User{
-		Name:   "system:kube-controller-manager",
-		Groups: []string{"system:authenticated", "gc-test"},
+		Name:   "system:serviceaccount:kube-system:generic-garbage-collector",
+		Groups: []string{"system:serviceaccounts", "system:serviceaccounts:kube-system", "system:authenticated", "gc-test"},
 	}, cfg)
 	require.NoError(t, err)
 	gcClient, err := client.New(gcUser.Config(), client.Options{Scheme: scheme})
