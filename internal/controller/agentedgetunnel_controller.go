@@ -361,9 +361,10 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		// policy state until this tunnel's jittered verification deadline. Keep a
 		// prior 429 warning visible until a successful verification clears it.
 		accessRateLimited = strings.HasPrefix(t.Status.Message, "Access policy verification rate-limited")
-		if accessSetupRequired {
-			// A missing application is not a verified policy. Do not create or
-			// restore a connector while initial Access setup is rate-limited.
+		if accessRateLimited || accessSetupRequired {
+			// A missing application is not a verified policy, and a prior 429
+			// leaves the existing policy unverified. Do not create or restore a
+			// connector until Access verification succeeds.
 			return ctrl.Result{RequeueAfter: activeRequeueAfter(t, now)}, nil
 		}
 	} else {
