@@ -19,9 +19,8 @@ spec:
       (
         request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' &&
         has(oldObject.metadata.finalizers) &&
-        has(object.metadata.finalizers) &&
-        object.metadata.finalizers.all(f, f in oldObject.metadata.finalizers) &&
-        oldObject.metadata.finalizers.filter(f, f != 'foregroundDeletion' && f != 'orphan').all(f, f in object.metadata.finalizers) &&
-        oldObject.metadata.finalizers.exists(f, (f == 'foregroundDeletion' || f == 'orphan') && !(f in object.metadata.finalizers))
+        (!has(object.metadata.finalizers) || object.metadata.finalizers.all(f, f in oldObject.metadata.finalizers)) &&
+        oldObject.metadata.finalizers.filter(f, f != 'foregroundDeletion' && f != 'orphan').all(f, has(object.metadata.finalizers) && f in object.metadata.finalizers) &&
+        oldObject.metadata.finalizers.exists(f, (f == 'foregroundDeletion' || f == 'orphan') && (!has(object.metadata.finalizers) || !(f in object.metadata.finalizers)))
       )
     message: only the edge-tunnel controller may change controller finalizers; the Kubernetes garbage collector may remove only its propagation finalizers
