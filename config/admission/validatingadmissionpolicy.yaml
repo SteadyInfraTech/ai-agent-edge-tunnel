@@ -20,28 +20,28 @@ spec:
   - name: skip-controller-finalizer-removal
     expression: >-
       !(
-  request.operation == 'UPDATE' &&
-  (
-    request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
-    request.userInfo.groups.exists(group, group == 'system:masters')
-  ) &&
-  has(oldObject.metadata.deletionTimestamp) &&
-  oldObject.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup') &&
-  (!has(object.metadata.finalizers) ||
-   !object.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup')) &&
-  oldObject.metadata.finalizers.filter(f, f != 'edge.steadyinfra.com/tunnel-cleanup').size() ==
-    (has(object.metadata.finalizers) ? object.metadata.finalizers.size() : 0) &&
-  (!has(object.metadata.finalizers) ||
-   object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(old, old == f))) &&
-  object.spec == oldObject.spec &&
-  object.metadata.labels == oldObject.metadata.labels &&
-  object.metadata.annotations == oldObject.metadata.annotations &&
-  object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
-  object.metadata.name == oldObject.metadata.name &&
-  object.metadata.namespace == oldObject.metadata.namespace &&
-  object.metadata.uid == oldObject.metadata.uid &&
-  object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp
-)
+        request.operation == 'UPDATE' &&
+        (
+          request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
+          request.userInfo.groups.exists(group, group == 'system:masters')
+        ) &&
+        has(oldObject.metadata.deletionTimestamp) &&
+        oldObject.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup') &&
+        (!has(object.metadata.finalizers) ||
+         !object.metadata.finalizers.exists(f, f == 'edge.steadyinfra.com/tunnel-cleanup')) &&
+        oldObject.metadata.finalizers.filter(f, f != 'edge.steadyinfra.com/tunnel-cleanup').size() ==
+          (has(object.metadata.finalizers) ? object.metadata.finalizers.size() : 0) &&
+        (!has(object.metadata.finalizers) ||
+         object.metadata.finalizers.all(f, oldObject.metadata.finalizers.exists(old, old == f))) &&
+        object.spec == oldObject.spec &&
+        object.metadata.labels == oldObject.metadata.labels &&
+        object.metadata.annotations == oldObject.metadata.annotations &&
+        object.metadata.ownerReferences == oldObject.metadata.ownerReferences &&
+        object.metadata.name == oldObject.metadata.name &&
+        object.metadata.namespace == oldObject.metadata.namespace &&
+        object.metadata.uid == oldObject.metadata.uid &&
+        object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp
+      )
   validations:
   - expression: >-
       params != null &&
