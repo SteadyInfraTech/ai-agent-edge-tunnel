@@ -586,9 +586,8 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	controllerInvalid.Finalizers = nil
 	require.NoError(t, controllerClient.Update(ctx, &controllerInvalid), "controller finalizer update must work with invalid policy parameters")
 
-	// kube-controller-manager authenticates as system:kube-controller-manager
-	// in the kind/kubeadm environment. Its garbage collector may remove only
-	// the propagation finalizer it owns, not controller or tenant finalizers.
+	// The generic-garbage-collector service account used by kubeadm/kind
+	// may remove only its propagation finalizer, not controller or tenant finalizers.
 	for _, testCase := range []struct {
 		name        string
 		propagation metav1.DeletionPropagation
