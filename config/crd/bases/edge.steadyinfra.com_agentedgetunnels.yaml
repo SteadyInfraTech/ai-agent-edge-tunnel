@@ -38,6 +38,12 @@ spec:
         required:
         - spec
         x-kubernetes-validations:
+        # allowPublic is admission-critical even before provisioning. Compare its
+        # effective value at the resource root so omission is treated as false.
+        - rule: >-
+            (has(self.spec.security) && has(self.spec.security.allowPublic) ? self.spec.security.allowPublic : false) ==
+            (has(oldSelf.spec.security) && has(oldSelf.spec.security.allowPublic) ? oldSelf.spec.security.allowPublic : false)
+          message: spec.security.allowPublic is immutable; delete and recreate the AgentEdgeTunnel to change public exposure
         # Nothing re-applies these to Cloudflare or to the connector once the
         # tunnel exists, so a silent edit would only make the spec lie.
         - rule: >-
@@ -150,6 +156,9 @@ spec:
                 properties:
                   allowPublic:
                     type: boolean
+                    x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: security.allowPublic is immutable once set
                   allowedEmails:
                     type: array
                     maxItems: 50

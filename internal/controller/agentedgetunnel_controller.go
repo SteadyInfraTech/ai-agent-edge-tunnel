@@ -308,6 +308,10 @@ func (r *AgentEdgeTunnelReconciler) reconcileDelete(ctx context.Context, t *agen
 // object could never be deleted. The patch carries the resourceVersion, so a
 // concurrent change still conflicts and is retried.
 func (r *AgentEdgeTunnelReconciler) patchFinalizers(ctx context.Context, t, orig *agentopsv1alpha1.AgentEdgeTunnel) error {
+	// Finalizer changes use the dedicated subresource. The tenant ValidatingAdmissionPolicy
+	// intentionally matches the main resource only, while RBAC grants this subresource
+	// exclusively to the controller. This keeps cleanup available if policy params vanish
+	// without weakening fail-closed validation for ordinary resource updates.
 	return r.Patch(ctx, t, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
 }
 

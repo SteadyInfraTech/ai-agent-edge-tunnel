@@ -223,11 +223,23 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(policyYAML, &policy))
 	require.NoError(t, k8s.Create(ctx, &policy))
 
+	finalizerPolicyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "finalizer_validatingadmissionpolicy.yaml"))
+	require.NoError(t, err)
+	var finalizerPolicy admissionregistrationv1.ValidatingAdmissionPolicy
+	require.NoError(t, yaml.Unmarshal(finalizerPolicyYAML, &finalizerPolicy))
+	require.NoError(t, k8s.Create(ctx, &finalizerPolicy))
+
 	bindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "validatingadmissionpolicybinding.yaml"))
 	require.NoError(t, err)
 	var binding admissionregistrationv1.ValidatingAdmissionPolicyBinding
 	require.NoError(t, yaml.Unmarshal(bindingYAML, &binding))
 	require.NoError(t, k8s.Create(ctx, &binding))
+
+	finalizerBindingYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "finalizer_validatingadmissionpolicybinding.yaml"))
+	require.NoError(t, err)
+	var finalizerBinding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	require.NoError(t, yaml.Unmarshal(finalizerBindingYAML, &finalizerBinding))
+	require.NoError(t, k8s.Create(ctx, &finalizerBinding))
 
 	quotaPolicyYAML, err := os.ReadFile(filepath.Join("..", "..", "config", "admission", "namespacequota_validatingadmissionpolicy.yaml"))
 	require.NoError(t, err)
@@ -271,6 +283,16 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, err)
 	controllerClient, err := client.New(controllerUser.Config(), client.Options{Scheme: scheme})
 	require.NoError(t, err)
+	// kubeadm (and therefore the kind test cluster) enables per-controller
+	// service-account credentials. The generic garbage collector authenticates
+	// as system:serviceaccount:kube-system:generic-garbage-collector.
+	gcUser, err := testEnv.AddUser(envtest.User{
+		Name:   "system:serviceaccount:kube-system:generic-garbage-collector",
+		Groups: []string{"system:serviceaccounts", "system:serviceaccounts:kube-system", "system:authenticated", "gc-test"},
+	}, cfg)
+	require.NoError(t, err)
+	gcClient, err := client.New(gcUser.Config(), client.Options{Scheme: scheme})
+	require.NoError(t, err)
 
 	quotaNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "quota-policy"}}
 	require.NoError(t, k8s.Create(ctx, quotaNamespace))
@@ -278,11 +300,18 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	// exercise admission policy, not an RBAC denial.
 	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
-		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{"edge.steadyinfra.com"},
-			Resources: []string{"namespacetunnelquotas", "namespacetunnelquotas/status"},
-			Verbs:     []string{"get", "list", "create", "update", "patch", "delete"},
-		}},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"edge.steadyinfra.com"},
+				Resources: []string{"namespacetunnelquotas", "namespacetunnelquotas/status"},
+				Verbs:     []string{"get", "list", "create", "update", "patch", "delete"},
+			},
+			{
+				APIGroups: []string{"edge.steadyinfra.com"},
+				Resources: []string{"agentedgetunnels"},
+				Verbs:     []string{"get", "update", "patch"},
+			},
+		},
 	}))
 	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
@@ -295,6 +324,7 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "tenant-users"},
 			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "quota-admins"},
 			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "controller-test"},
+			{Kind: "Group", APIGroup: rbacv1.GroupName, Name: "gc-test"},
 		},
 	}))
 	quotaObject := func() *agentopsv1alpha1.NamespaceTunnelQuota {
@@ -425,6 +455,16 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	require.NoError(t, k8s.Create(ctx, newTunnel("allowed-public", "public-allowed", "zone-123", true)),
 		"allowPublic must be accepted in an exactly allowlisted namespace")
 
+	// The omitted allowPublic value is effectively false and must not be
+	// changeable to true before the controller has provisioned a tunnel.
+	omittedAllowPublic := newTunnel("restricted", "public-immutability-before-provisioning", "zone-123", false)
+	require.NoError(t, k8s.Create(ctx, omittedAllowPublic))
+	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(omittedAllowPublic), omittedAllowPublic))
+	require.Empty(t, omittedAllowPublic.Status.TunnelID, "the immutability check must cover pre-provisioning updates")
+	omittedAllowPublic.Spec.Security.AllowPublic = true
+	require.Error(t, k8s.Update(ctx, omittedAllowPublic),
+		"omitted allowPublic (effective false) must not be changeable to true before provisioning")
+
 	// Prove the API server has observed each ConfigMap update before checking
 	// normalization; otherwise a stale, previously-valid parameter could mask a bug.
 	params.Data["CLOUDFLARE_ZONE_NAME"] = ".example.com"
@@ -459,40 +499,34 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
 	require.NoError(t, k8s.Update(ctx, params))
 
-	// A terminating object can remove its finalizer when parameters exist,
-	// even if their values are invalid. Missing parameters remain fail-closed.
-	terminating := newTunnel("restricted", "finalizer-cleanup", "zone-123", false)
+	// Keep two terminating objects to exercise finalizer recovery with both
+	// missing and invalid admission parameters.
+	terminating := newTunnel("restricted", "finalizer-cleanup-missing-params", "zone-123", false)
 	terminating.Finalizers = []string{FinalizerName}
 	require.NoError(t, k8s.Create(ctx, terminating))
 	require.NoError(t, k8s.Delete(ctx, terminating))
 	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
 	require.NotNil(t, terminating.DeletionTimestamp)
+
+	terminatingInvalid := newTunnel("restricted", "finalizer-cleanup-invalid-params", "zone-123", false)
+	terminatingInvalid.Finalizers = []string{FinalizerName}
+	require.NoError(t, k8s.Create(ctx, terminatingInvalid))
+	require.NoError(t, k8s.Delete(ctx, terminatingInvalid))
 	require.NoError(t, k8s.Delete(ctx, params))
 
-	// Parameter resolution is cached by the API server. Wait until the deleted
-	// ConfigMap is no longer served as policy parameters before asserting that
-	// both ordinary updates and creates are denied.
+	// The parameterized policy is CREATE-only. Zone ID is immutable in the
+	// CRD and allowPublic is immutable too, so updates remain safe during a
+	// ConfigMap outage while cleanup can still release the finalizer.
+	var ordinaryUpdate agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, k8s.Get(ctx, client.ObjectKey{Namespace: "restricted", Name: "valid-protected"}, &ordinaryUpdate))
+	ordinaryUpdate.Annotations = map[string]string{"tenant-change": "allowed-with-missing-params"}
+	require.NoError(t, k8s.Update(ctx, &ordinaryUpdate), "ordinary metadata updates must remain available during parameter outages")
+	ordinaryUpdate.Spec.Cloudflare.ZoneID = "attacker-zone"
+	require.Error(t, k8s.Update(ctx, &ordinaryUpdate), "the CRD must keep zoneID immutable without policy parameters")
+
 	isMissingParameterDenial := func(err error) bool {
 		return apierrors.IsForbidden(err) || apierrors.IsInvalid(err)
 	}
-	deadline = time.Now().Add(15 * time.Second)
-	updateDenied := false
-	for time.Now().Before(deadline) {
-		var ordinaryUpdate agentopsv1alpha1.AgentEdgeTunnel
-		require.NoError(t, k8s.Get(ctx, client.ObjectKey{Namespace: "restricted", Name: "valid-protected"}, &ordinaryUpdate))
-		ordinaryUpdate.Annotations = map[string]string{"tenant-change": fmt.Sprintf("%d", time.Now().UnixNano())}
-		updateErr := k8s.Update(ctx, &ordinaryUpdate)
-		if isMissingParameterDenial(updateErr) {
-			updateDenied = true
-			break
-		}
-		if updateErr != nil {
-			t.Fatalf("unexpected error while waiting for missing policy parameters to take effect: %v", updateErr)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	require.True(t, updateDenied, "ordinary updates must remain fail-closed when policy parameters are missing")
-
 	createDenied := false
 	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -510,8 +544,27 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.True(t, createDenied, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
 
-	// Restore the ConfigMap with an invalid zone ID. Admission remains
-	// fail-closed for finalizer removal until the configuration is valid again.
+	// Only the controller identity may change finalizers. The parameter-free
+	// policy keeps this authorization available while zone parameters are absent.
+	var tenantTerminating agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(terminating), &tenantTerminating))
+	tenantTerminating.Finalizers = nil
+	require.Error(t, tenantClient.Update(ctx, &tenantTerminating), "tenant users must not remove controller finalizers")
+
+	var controllerTerminating agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminating), &controllerTerminating))
+	controllerTerminating.Finalizers = nil
+	controllerTerminating.Spec.Cloudflare.ZoneID = "attacker-zone"
+	require.Error(t, controllerClient.Update(ctx, &controllerTerminating), "immutable zone ID must remain protected during parameter outages")
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminating), &controllerTerminating))
+	controllerTerminating.Finalizers = nil
+	require.NoError(t, controllerClient.Update(ctx, &controllerTerminating), "controller may remove the finalizer during parameter outages")
+	var deletedAfterFinalizer agentopsv1alpha1.AgentEdgeTunnel
+	require.True(t, apierrors.IsNotFound(k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &deletedAfterFinalizer)),
+		"removing the last finalizer must complete deletion")
+
+	// Restore the ConfigMap with an invalid zone ID and verify the same narrow
+	// exception works without permitting tenant finalizer removal.
 	restoredParams := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
@@ -523,42 +576,67 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.NoError(t, k8s.Create(ctx, restoredParams))
 	probePolicyUntilDenied("zone-123", "wrong-zone-after-restore")
-	var current agentopsv1alpha1.AgentEdgeTunnel
-	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &current))
-	current.Finalizers = nil
-	var finalizerRemovalDenied bool
-	deadline = time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		removeErr := k8s.Update(ctx, &current)
-		if apierrors.IsForbidden(removeErr) || apierrors.IsInvalid(removeErr) {
-			finalizerRemovalDenied = true
-			break
-		}
-		if removeErr != nil {
-			t.Fatalf("unexpected error while checking invalid-parameter cleanup behavior: %v", removeErr)
-		}
-		t.Fatalf("finalizer removal unexpectedly succeeded with an invalid zone ID")
-	}
-	require.True(t, finalizerRemovalDenied, "finalizer removal must remain blocked while admission parameters are invalid")
+	var tenantInvalid agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(terminatingInvalid), &tenantInvalid))
+	tenantInvalid.Finalizers = nil
+	require.Error(t, tenantClient.Update(ctx, &tenantInvalid), "tenant users must not remove finalizers while parameters are invalid")
 
-	// Repair the parameter ConfigMap, then the terminating resource can finish.
-	restoredParams.Data["CLOUDFLARE_ZONE_ID"] = "zone-123"
-	require.NoError(t, k8s.Update(ctx, restoredParams))
-	finalizerRemoved := false
-	deadline = time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		var latest agentopsv1alpha1.AgentEdgeTunnel
-		require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &latest))
-		latest.Finalizers = nil
-		removeErr := k8s.Update(ctx, &latest)
-		if removeErr == nil {
-			finalizerRemoved = true
-			break
-		}
-		if !apierrors.IsForbidden(removeErr) && !apierrors.IsInvalid(removeErr) {
-			t.Fatalf("unexpected error while waiting for valid parameters: %v", removeErr)
-		}
-		time.Sleep(100 * time.Millisecond)
+	var controllerInvalid agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminatingInvalid), &controllerInvalid))
+	controllerInvalid.Finalizers = nil
+	require.NoError(t, controllerClient.Update(ctx, &controllerInvalid), "controller finalizer update must work with invalid policy parameters")
+
+	// The generic-garbage-collector service account used by kubeadm/kind
+	// may remove only its propagation finalizer, not controller or tenant finalizers.
+	for _, testCase := range []struct {
+		name        string
+		propagation metav1.DeletionPropagation
+		gcFinalizer string
+	}{
+		{name: "foreground", propagation: metav1.DeletePropagationForeground, gcFinalizer: "foregroundDeletion"},
+		{name: "orphan", propagation: metav1.DeletePropagationOrphan, gcFinalizer: "orphan"},
+	} {
+		t.Run("garbage-collector-"+testCase.name, func(t *testing.T) {
+			object := newTunnel("restricted", "gc-"+testCase.name, "different-zone", false)
+			object.Finalizers = []string{FinalizerName, testCase.gcFinalizer}
+			require.NoError(t, k8s.Create(ctx, object))
+			require.NoError(t, k8s.Delete(ctx, object, &client.DeleteOptions{PropagationPolicy: &testCase.propagation}))
+
+			key := client.ObjectKeyFromObject(object)
+			var deleting agentopsv1alpha1.AgentEdgeTunnel
+			require.NoError(t, k8s.Get(ctx, key, &deleting))
+			require.NotNil(t, deleting.DeletionTimestamp)
+
+			// Tenant identities cannot remove the GC finalizer.
+			var tenantView agentopsv1alpha1.AgentEdgeTunnel
+			require.NoError(t, tenantClient.Get(ctx, key, &tenantView))
+			tenantView.Finalizers = []string{FinalizerName}
+			require.Error(t, tenantClient.Update(ctx, &tenantView))
+
+			// The GC identity cannot remove the controller finalizer or add
+			// a finalizer it does not own.
+			var gcView agentopsv1alpha1.AgentEdgeTunnel
+			require.NoError(t, gcClient.Get(ctx, key, &gcView))
+			gcView.Finalizers = []string{testCase.gcFinalizer}
+			require.Error(t, gcClient.Update(ctx, &gcView), "GC must preserve the controller finalizer")
+			require.NoError(t, gcClient.Get(ctx, key, &gcView))
+			gcView.Finalizers = []string{FinalizerName, testCase.gcFinalizer, "tenant.example.com/unowned"}
+			require.Error(t, gcClient.Update(ctx, &gcView), "GC must not add an unowned finalizer")
+
+			// The controller releases its own finalizer first. The GC then
+			// removes its propagation finalizer as the last finalizer.
+			var controllerView agentopsv1alpha1.AgentEdgeTunnel
+			require.NoError(t, controllerClient.Get(ctx, key, &controllerView))
+			controllerView.Finalizers = []string{testCase.gcFinalizer}
+			require.NoError(t, controllerClient.Update(ctx, &controllerView))
+			require.NoError(t, gcClient.Get(ctx, key, &gcView))
+			require.Equal(t, []string{testCase.gcFinalizer}, gcView.Finalizers)
+
+			gcView.Finalizers = nil
+			require.NoError(t, gcClient.Update(ctx, &gcView), "GC must be able to remove its finalizer when it is the last one")
+			var deleted agentopsv1alpha1.AgentEdgeTunnel
+			require.True(t, apierrors.IsNotFound(k8s.Get(ctx, key, &deleted)),
+				"object should be removed after GC and controller release their finalizers")
+		})
 	}
-	require.True(t, finalizerRemoved, "finalizer removal should succeed after restoring valid admission parameters")
 }

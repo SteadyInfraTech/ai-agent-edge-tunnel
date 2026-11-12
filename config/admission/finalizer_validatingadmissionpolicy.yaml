@@ -1,0 +1,26 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: edge-tunnel-finalizer-policy
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [edge.steadyinfra.com]
+      apiVersions: [v1alpha1]
+      operations: [UPDATE]
+      resources: [agentedgetunnels]
+      scope: Namespaced
+  validations:
+  - expression: >-
+      (has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
+       (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)) ||
+      request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
+      (
+        request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' &&
+        has(oldObject.metadata.finalizers) &&
+        (!has(object.metadata.finalizers) || object.metadata.finalizers.all(f, f in oldObject.metadata.finalizers)) &&
+        oldObject.metadata.finalizers.filter(f, f != 'foregroundDeletion' && f != 'orphan').all(f, has(object.metadata.finalizers) && f in object.metadata.finalizers) &&
+        oldObject.metadata.finalizers.exists(f, (f == 'foregroundDeletion' || f == 'orphan') && (!has(object.metadata.finalizers) || !(f in object.metadata.finalizers)))
+      )
+    message: only the edge-tunnel controller may change controller finalizers; the Kubernetes garbage collector may remove only its propagation finalizers
