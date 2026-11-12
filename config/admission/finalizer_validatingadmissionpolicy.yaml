@@ -13,6 +13,7 @@ spec:
       scope: Namespaced
   validations:
   - expression: >-
-      object.metadata.finalizers == oldObject.metadata.finalizers ||
+      (has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
+       (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)) ||
       request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager'
     message: only the edge-tunnel controller may change AgentEdgeTunnel finalizers
