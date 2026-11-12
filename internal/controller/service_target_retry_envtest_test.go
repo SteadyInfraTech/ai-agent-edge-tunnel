@@ -131,10 +131,15 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 		err := k8s.Get(ctx, client.ObjectKeyFromObject(tunnel), &got)
 		return got, err
 	}
-	require.Eventually(t, func() bool {
+	var lastObserved agentopsv1alpha1.AgentEdgeTunnelStatus
+	require.Eventuallyf(t, func() bool {
 		got, err := fetchTunnel()
-		return err == nil && got.Status.Phase == agentopsv1alpha1.PhaseActive
-	}, 30*time.Second, 100*time.Millisecond, "the manager should provision the tunnel")
+		if err != nil {
+			return false
+		}
+		lastObserved = got.Status
+		return got.Status.Phase == agentopsv1alpha1.PhaseActive
+	}, 30*time.Second, 100*time.Millisecond, "the manager should provision the tunnel; last status phase=%q message=%q", lastObserved.Phase, lastObserved.Message)
 
 	sliceKey := client.ObjectKey{Namespace: namespace, Name: "langgraph-worker-slice"}
 	require.NoError(t, k8s.Get(ctx, sliceKey, slice))
