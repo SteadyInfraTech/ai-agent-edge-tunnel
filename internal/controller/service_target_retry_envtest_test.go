@@ -132,14 +132,20 @@ func TestServiceTargetRetryManagerEnvtest(t *testing.T) {
 		return got, err
 	}
 	var lastObserved agentopsv1alpha1.AgentEdgeTunnelStatus
-	require.Eventuallyf(t, func() bool {
+	deadline := time.Now().Add(30 * time.Second)
+	active := false
+	for time.Now().Before(deadline) {
 		got, err := fetchTunnel()
-		if err != nil {
-			return false
+		if err == nil {
+			lastObserved = got.Status
+			if got.Status.Phase == agentopsv1alpha1.PhaseActive {
+				active = true
+				break
+			}
 		}
-		lastObserved = got.Status
-		return got.Status.Phase == agentopsv1alpha1.PhaseActive
-	}, 30*time.Second, 100*time.Millisecond, "the manager should provision the tunnel; last status phase=%q message=%q", lastObserved.Phase, lastObserved.Message)
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.Truef(t, active, "the manager should provision the tunnel; last status phase=%q message=%q", lastObserved.Phase, lastObserved.Message)
 
 	sliceKey := client.ObjectKey{Namespace: namespace, Name: "langgraph-worker-slice"}
 	require.NoError(t, k8s.Get(ctx, sliceKey, slice))
