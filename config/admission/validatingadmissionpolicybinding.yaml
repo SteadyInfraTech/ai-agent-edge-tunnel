@@ -9,4 +9,6 @@ spec:
   paramRef:
     name: edge-tunnel-config
     namespace: edge-tunnel-system
-    parameterNotFoundAction: Deny
+    # Missing parameters still deny normal creates and updates because each validation checks params != null.
+    # Allow only the narrowly-scoped controller finalizer removal exception during deletion.
+    parameterNotFoundAction: Allow
