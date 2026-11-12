@@ -278,11 +278,18 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	// exercise admission policy, not an RBAC denial.
 	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
-		Rules: []rbacv1.PolicyRule{{
+		Rules: []rbacv1.PolicyRule{
+		{
 			APIGroups: []string{"edge.steadyinfra.com"},
 			Resources: []string{"namespacetunnelquotas", "namespacetunnelquotas/status"},
 			Verbs:     []string{"get", "list", "create", "update", "patch", "delete"},
-		}},
+		},
+		{
+			APIGroups: []string{"edge.steadyinfra.com"},
+			Resources: []string{"agentedgetunnels"},
+			Verbs:     []string{"get", "update", "patch"},
+		},
+	},
 	}))
 	require.NoError(t, k8s.Create(ctx, &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota-policy-test"},
@@ -459,14 +466,19 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	params.Data["EDGE_BASE_DOMAIN"] = "agents.example.com"
 	require.NoError(t, k8s.Update(ctx, params))
 
-	// A terminating object can remove its finalizer when parameters exist,
-	// even if their values are invalid. Missing parameters remain fail-closed.
-	terminating := newTunnel("restricted", "finalizer-cleanup", "zone-123", false)
+	// Keep two terminating objects to exercise finalizer recovery with both
+	// missing and invalid admission parameters.
+	terminating := newTunnel("restricted", "finalizer-cleanup-missing-params", "zone-123", false)
 	terminating.Finalizers = []string{FinalizerName}
 	require.NoError(t, k8s.Create(ctx, terminating))
 	require.NoError(t, k8s.Delete(ctx, terminating))
 	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), terminating))
 	require.NotNil(t, terminating.DeletionTimestamp)
+
+	terminatingInvalid := newTunnel("restricted", "finalizer-cleanup-invalid-params", "zone-123", false)
+	terminatingInvalid.Finalizers = []string{FinalizerName}
+	require.NoError(t, k8s.Create(ctx, terminatingInvalid))
+	require.NoError(t, k8s.Delete(ctx, terminatingInvalid))
 	require.NoError(t, k8s.Delete(ctx, params))
 
 	// Parameter resolution is cached by the API server. Wait until the deleted
@@ -510,8 +522,26 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.True(t, createDenied, "ordinary creates must remain fail-closed when the parameter ConfigMap is missing")
 
-	// Restore the ConfigMap with an invalid zone ID. Admission remains
-	// fail-closed for finalizer removal until the configuration is valid again.
+	// Tenant users cannot use the exception to remove the controller's finalizer.
+	var tenantTerminating agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(terminating), &tenantTerminating))
+	tenantTerminating.Finalizers = nil
+	require.Error(t, tenantClient.Update(ctx, &tenantTerminating), "tenant users must not remove controller finalizers")
+
+	// The controller may remove exactly its own finalizer after deletion has
+	// started, even while policy parameters are unavailable. Combining this
+	// operation with a spec mutation must still be rejected.
+	var controllerTerminating agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminating), &controllerTerminating))
+	controllerTerminating.Finalizers = nil
+	controllerTerminating.Spec.Cloudflare.ZoneID = "attacker-zone"
+	require.Error(t, controllerClient.Update(ctx, &controllerTerminating), "finalizer removal must not bypass spec validation")
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminating), &controllerTerminating))
+	controllerTerminating.Finalizers = nil
+	require.NoError(t, controllerClient.Update(ctx, &controllerTerminating), "controller finalizer removal must recover when parameters are missing")
+
+	// Restore the ConfigMap with an invalid zone ID and verify the same narrow
+	// exception works without permitting tenant finalizer removal.
 	restoredParams := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-tunnel-config", Namespace: "edge-tunnel-system"},
 		Data: map[string]string{
@@ -523,42 +553,13 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	}
 	require.NoError(t, k8s.Create(ctx, restoredParams))
 	probePolicyUntilDenied("zone-123", "wrong-zone-after-restore")
-	var current agentopsv1alpha1.AgentEdgeTunnel
-	require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &current))
-	current.Finalizers = nil
-	var finalizerRemovalDenied bool
-	deadline = time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		removeErr := k8s.Update(ctx, &current)
-		if apierrors.IsForbidden(removeErr) || apierrors.IsInvalid(removeErr) {
-			finalizerRemovalDenied = true
-			break
-		}
-		if removeErr != nil {
-			t.Fatalf("unexpected error while checking invalid-parameter cleanup behavior: %v", removeErr)
-		}
-		t.Fatalf("finalizer removal unexpectedly succeeded with an invalid zone ID")
-	}
-	require.True(t, finalizerRemovalDenied, "finalizer removal must remain blocked while admission parameters are invalid")
+	var tenantInvalid agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, tenantClient.Get(ctx, client.ObjectKeyFromObject(terminatingInvalid), &tenantInvalid))
+	tenantInvalid.Finalizers = nil
+	require.Error(t, tenantClient.Update(ctx, &tenantInvalid), "tenant users must not remove finalizers while parameters are invalid")
 
-	// Repair the parameter ConfigMap, then the terminating resource can finish.
-	restoredParams.Data["CLOUDFLARE_ZONE_ID"] = "zone-123"
-	require.NoError(t, k8s.Update(ctx, restoredParams))
-	finalizerRemoved := false
-	deadline = time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		var latest agentopsv1alpha1.AgentEdgeTunnel
-		require.NoError(t, k8s.Get(ctx, client.ObjectKeyFromObject(terminating), &latest))
-		latest.Finalizers = nil
-		removeErr := k8s.Update(ctx, &latest)
-		if removeErr == nil {
-			finalizerRemoved = true
-			break
-		}
-		if !apierrors.IsForbidden(removeErr) && !apierrors.IsInvalid(removeErr) {
-			t.Fatalf("unexpected error while waiting for valid parameters: %v", removeErr)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	require.True(t, finalizerRemoved, "finalizer removal should succeed after restoring valid admission parameters")
+	var controllerInvalid agentopsv1alpha1.AgentEdgeTunnel
+	require.NoError(t, controllerClient.Get(ctx, client.ObjectKeyFromObject(terminatingInvalid), &controllerInvalid))
+	controllerInvalid.Finalizers = nil
+	require.NoError(t, controllerClient.Update(ctx, &controllerInvalid), "controller finalizer removal must work with invalid policy parameters")
 }
