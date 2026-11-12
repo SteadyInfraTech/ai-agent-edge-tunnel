@@ -183,6 +183,12 @@ spec:
                 type: string
               accessAppID:
                 type: string
+              accessPolicyVerifiedAt:
+                type: string
+                format: date-time
+              accessPolicyNextCheckAt:
+                type: string
+                format: date-time
               sessionUID:
                 type: string
               sessionEndpoint:

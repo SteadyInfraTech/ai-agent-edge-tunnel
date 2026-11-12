@@ -1406,6 +1406,11 @@ func TestAccessPolicyDriftTerminatesTunnelFailsClosed(t *testing.T) {
 			require.NotEmpty(t, h.cf.DNSRecords)
 
 			mutate(h)
+			// Access policy verification is intentionally scheduled; advance the
+			// fake clock so this test exercises drift detection immediately.
+			current := h.get()
+			require.NotNil(t, current.Status.AccessPolicyNextCheckAt)
+			h.now = current.Status.AccessPolicyNextCheckAt.Time
 			_, err = h.reconcile()
 			require.NoError(t, err, "successful fail-closed cleanup should converge")
 			got := h.get()
@@ -1433,6 +1438,8 @@ func TestActiveTunnelKeepsResourcesWhenAccessVerificationFails(t *testing.T) {
 	require.Len(t, h.cf.Tunnels, 1)
 	require.Len(t, h.cf.AccessApps, 1)
 
+	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+	h.now = active.Status.AccessPolicyNextCheckAt.Time
 	h.cf.FindAccessErr = errors.New("Cloudflare API temporarily unavailable")
 	_, err = h.reconcile()
 	require.Error(t, err)
@@ -1445,4 +1452,139 @@ func TestActiveTunnelKeepsResourcesWhenAccessVerificationFails(t *testing.T) {
 	assert.Len(t, h.cf.Tunnels, 1)
 	assert.Contains(t, h.cf.AccessApps, active.Status.AccessAppID)
 	assert.Len(t, h.cf.AccessApps, 1)
+}
+
+// TestAccessPolicyVerificationIsJitteredAndRateLimited verifies that frequent
+// session reconciles reuse the last verified policy, and Cloudflare 429s defer
+// the next verification without terminating or marking the tunnel unprotected.
+func TestAccessPolicyVerificationIsJitteredAndRateLimited(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	require.Equal(t, agentopsv1alpha1.PhaseActive, active.Status.Phase)
+	require.NotNil(t, active.Status.AccessPolicyVerifiedAt)
+	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+	assert.Zero(t, h.cf.VerifyAccessCalls, "successful policy creation is the initial trusted verification")
+
+	firstCheck := active.Status.AccessPolicyNextCheckAt.Time
+	h.now = firstCheck.Add(-time.Second)
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Zero(t, h.cf.VerifyAccessCalls, "reconciles before the deadline must not call Cloudflare")
+
+	// Simulate connector loss immediately before a due verification. A 429
+	// must not restore it from retained credentials.
+	deployment, err := h.deployment()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
+
+	h.now = firstCheck
+	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
+	_, err = h.reconcile()
+	require.NoError(t, err, "rate limiting is deferred, not treated as policy drift")
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
+	assert.Contains(t, got.Status.Message, "rate-limited")
+	assert.Equal(t, active.Status.AccessPolicyVerifiedAt, got.Status.AccessPolicyVerifiedAt, "429 must preserve the last successful verification")
+	require.NotNil(t, got.Status.AccessPolicyNextCheckAt)
+	assert.Equal(t, h.now.Add(accessPolicyRateLimitDelay(&active)).Truncate(time.Second), got.Status.AccessPolicyNextCheckAt.Time)
+	assert.Equal(t, active.Status.TunnelID, h.cf.DNSRecords[active.Status.Hostname], "the existing route remains intact")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "a missing connector must not be restored while Access verification is rate-limited")
+	assert.Equal(t, 1, h.cf.VerifyAccessCalls)
+
+	h.cf.FindAccessErr = nil
+	retryAt := got.Status.AccessPolicyNextCheckAt.Time
+	h.now = retryAt.Add(-time.Second)
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	got = h.get()
+	assert.Contains(t, got.Status.Message, "rate-limited", "the warning remains until a successful verification")
+	assert.Equal(t, 1, h.cf.VerifyAccessCalls, "reconciles during backoff must not call Cloudflare")
+	_, deploymentErr = h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "backoff reconciles must not restore the connector")
+
+	h.now = retryAt
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	got = h.get()
+	assert.Equal(t, 2, h.cf.VerifyAccessCalls, "verification resumes after the backoff")
+	assert.Equal(t, h.now, got.Status.AccessPolicyVerifiedAt.Time)
+	assert.True(t, got.Status.AccessPolicyNextCheckAt.Time.After(h.now))
+	assert.NotContains(t, got.Status.Message, "rate-limited")
+}
+
+// TestInitialAccessRateLimitDoesNotRestoreConnector ensures an Active legacy
+// tunnel without a recorded Access application cannot recreate its connector
+// while initial Access setup is rate-limited.
+func TestInitialAccessRateLimitDoesNotRestoreConnector(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	require.Equal(t, agentopsv1alpha1.PhaseActive, active.Status.Phase)
+	require.NotEmpty(t, active.Status.AccessAppID)
+
+	// Model an older/incomplete Active object and a missing connector.
+	active.Status.AccessAppID = ""
+	active.Status.AccessPolicyNextCheckAt = nil
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &active))
+	deployment, err := h.deployment()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
+	secret, err := h.secret()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), secret))
+
+	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	require.Greater(t, res.RequeueAfter, time.Duration(0))
+	got := h.get()
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
+	assert.Empty(t, got.Status.AccessAppID)
+	assert.Contains(t, got.Status.Message, "rate-limited")
+	h.assertConnectorGone()
+
+	// Reconciliation during backoff must not bypass the deadline or restore
+	// the connector before the Access application has been established.
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	h.assertConnectorGone()
+}
+
+func TestActiveRequeueAfterPreservesLifecycleLimitsDuringAccessBackoff(t *testing.T) {
+	now := t0
+	deadline := metav1.NewTime(now.Add(90 * time.Second))
+	expires := metav1.NewTime(now.Add(5 * time.Second))
+	tunnel := &agentopsv1alpha1.AgentEdgeTunnel{
+		Spec: agentopsv1alpha1.AgentEdgeTunnelSpec{},
+		Status: agentopsv1alpha1.AgentEdgeTunnelStatus{
+			AccessPolicyNextCheckAt: &deadline,
+			ExpiresAt:               &expires,
+		},
+	}
+	assert.Equal(t, 5*time.Second, activeRequeueAfter(tunnel, now), "TTL cleanup must run before Access retry")
+
+	tunnel.Status.ExpiresAt = nil
+	tunnel.Spec.SessionRef = &agentopsv1alpha1.SessionReference{Name: "session"}
+	assert.Equal(t, sessionPollInterval, activeRequeueAfter(tunnel, now), "session state must be polled before Access retry")
+
+	tunnel.Spec.SessionRef = nil
+	assert.Equal(t, maxRequeue, activeRequeueAfter(tunnel, now), "ordinary Active checks remain bounded by maxRequeue")
+}
+
+// TestAccessPolicyVerificationIntervalIsJittered ensures each tunnel receives
+// a stable interval in the five-to-ten-minute range.
+func TestAccessPolicyVerificationIntervalIsJittered(t *testing.T) {
+	a := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: "uid-a"}}
+	b := &agentopsv1alpha1.AgentEdgeTunnel{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "ns", UID: "uid-b"}}
+	for _, tunnel := range []*agentopsv1alpha1.AgentEdgeTunnel{a, b} {
+		interval := accessPolicyVerificationInterval(tunnel)
+		assert.GreaterOrEqual(t, interval, 5*time.Minute)
+		assert.Less(t, interval, 10*time.Minute)
+		assert.Equal(t, interval, accessPolicyVerificationInterval(tunnel), "jitter must be stable for a given tunnel")
+	}
+	assert.NotEqual(t, accessPolicyVerificationInterval(a), accessPolicyVerificationInterval(b))
 }

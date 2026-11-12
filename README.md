@@ -38,6 +38,18 @@ sample-agent-tunnel   Active   agent-job-8f92.agents.acme.dev   true        2026
 `Active` means the tunnel and DNS record exist, plus the Access policy for email-protected objects; `CONNECTED` is whether the cloudflared pod
 has connected to Cloudflare's edge.
 
+### Access policy verification cadence
+
+Email-protected active tunnels re-verify the complete Cloudflare Access application and policy on a per-tunnel
+jittered interval of 5-10 minutes. Session reconciliation and Kubernetes watch events reuse the last successful
+verification until that deadline, rather than issuing Access API reads on every 10-second session poll. Successful
+checks persist their verification time and next deadline in status.
+
+A Cloudflare HTTP 429 is treated as API-budget pressure, not proof of policy drift: the tunnel remains Active,
+the existing tunnel state is retained and surfaced as a rate-limit warning, and verification is deferred for a
+per-tunnel jittered 1-2 minute backoff. Other verification errors remain visible as unprotected and are retried by reconciliation;
+a confirmed policy mismatch still terminates the tunnel fail-closed.
+
 ## Exposing an AgentSession
 
 Instead of a fixed `spec.service`, a tunnel can follow an `AgentSession` from
