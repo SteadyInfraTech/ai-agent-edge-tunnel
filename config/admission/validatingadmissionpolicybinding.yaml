@@ -10,3 +10,12 @@ spec:
     name: edge-tunnel-config
     namespace: edge-tunnel-system
     parameterNotFoundAction: Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: edge-tunnel-finalizer-policy
+spec:
+  policyName: edge-tunnel-finalizer-policy
+  validationActions:
+  - Deny
