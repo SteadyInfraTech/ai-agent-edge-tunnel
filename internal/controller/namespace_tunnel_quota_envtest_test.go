@@ -613,15 +613,15 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 			tenantView.Finalizers = []string{FinalizerName}
 			require.Error(t, tenantClient.Update(ctx, &tenantView))
 
-			// The GC identity cannot remove the controller finalizer or replace
-			// the GC finalizer with a finalizer it does not own.
+			// The GC identity cannot remove the controller finalizer or add
+			// a finalizer it does not own.
 			var gcView agentopsv1alpha1.AgentEdgeTunnel
 			require.NoError(t, gcClient.Get(ctx, key, &gcView))
 			gcView.Finalizers = []string{testCase.gcFinalizer}
 			require.Error(t, gcClient.Update(ctx, &gcView), "GC must preserve the controller finalizer")
 			require.NoError(t, gcClient.Get(ctx, key, &gcView))
-			gcView.Finalizers = []string{FinalizerName, "tenant.example.com/unowned"}
-			require.Error(t, gcClient.Update(ctx, &gcView), "GC must not add an unowned finalizer while removing its own")
+			gcView.Finalizers = []string{FinalizerName, testCase.gcFinalizer, "tenant.example.com/unowned"}
+			require.Error(t, gcClient.Update(ctx, &gcView), "GC must not add an unowned finalizer")
 
 			// The controller releases its own finalizer first. The GC then
 			// removes its propagation finalizer as the last finalizer.
