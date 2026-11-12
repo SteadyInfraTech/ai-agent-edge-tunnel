@@ -503,6 +503,9 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 	ordinaryUpdate.Spec.Cloudflare.ZoneID = "attacker-zone"
 	require.Error(t, k8s.Update(ctx, &ordinaryUpdate), "the CRD must keep zoneID immutable without policy parameters")
 
+	isMissingParameterDenial := func(err error) bool {
+		return apierrors.IsForbidden(err) || apierrors.IsInvalid(err)
+	}
 	createDenied := false
 	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
