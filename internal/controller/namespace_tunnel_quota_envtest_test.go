@@ -624,18 +624,17 @@ func TestTenantAdmissionPolicyEnvtest(t *testing.T) {
 			gcView.Finalizers = []string{FinalizerName, "tenant.example.com/unowned"}
 			require.Error(t, gcClient.Update(ctx, &gcView), "GC must not add an unowned finalizer while removing its own")
 
-			// Removing only the propagation finalizer is allowed. The object
-			// remains until the controller removes its own finalizer.
-			require.NoError(t, gcClient.Get(ctx, key, &gcView))
-			gcView.Finalizers = []string{FinalizerName}
-			require.NoError(t, gcClient.Update(ctx, &gcView))
-			require.NoError(t, gcClient.Get(ctx, key, &gcView))
-			require.Equal(t, []string{FinalizerName}, gcView.Finalizers)
-
+			// The controller releases its own finalizer first. The GC then
+			// removes its propagation finalizer as the last finalizer.
 			var controllerView agentopsv1alpha1.AgentEdgeTunnel
 			require.NoError(t, controllerClient.Get(ctx, key, &controllerView))
-			controllerView.Finalizers = nil
+			controllerView.Finalizers = []string{testCase.gcFinalizer}
 			require.NoError(t, controllerClient.Update(ctx, &controllerView))
+			require.NoError(t, gcClient.Get(ctx, key, &gcView))
+			require.Equal(t, []string{testCase.gcFinalizer}, gcView.Finalizers)
+
+			gcView.Finalizers = nil
+			require.NoError(t, gcClient.Update(ctx, &gcView), "GC must be able to remove its finalizer when it is the last one")
 			var deleted agentopsv1alpha1.AgentEdgeTunnel
 			require.True(t, apierrors.IsNotFound(k8s.Get(ctx, key, &deleted)),
 				"object should be removed after GC and controller release their finalizers")
