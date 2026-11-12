@@ -150,6 +150,9 @@ spec:
                 properties:
                   allowPublic:
                     type: boolean
+                    x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: security.allowPublic is immutable once set
                   allowedEmails:
                     type: array
                     maxItems: 50
