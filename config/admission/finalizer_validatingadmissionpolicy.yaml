@@ -17,7 +17,7 @@ spec:
        (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)) ||
       request.userInfo.username == 'system:serviceaccount:edge-tunnel-system:edge-tunnel-controller-manager' ||
       (
-        request.userInfo.username == 'system:kube-controller-manager' &&
+        request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' &&
         has(oldObject.metadata.finalizers) &&
         has(object.metadata.finalizers) &&
         object.metadata.finalizers.all(f, f in oldObject.metadata.finalizers) &&
