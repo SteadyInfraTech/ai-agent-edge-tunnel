@@ -203,6 +203,8 @@ func TestProvisionsProtectedTunnelWithConnector(t *testing.T) {
 	sec, err := h.secret()
 	require.NoError(t, err)
 	assert.True(t, metav1.IsControlledBy(sec, &got))
+	require.NotNil(t, sec.Immutable)
+	assert.True(t, *sec.Immutable, "connector credentials must be immutable")
 	assert.Contains(t, string(sec.Data[credentialsKey]), got.Status.TunnelID)
 	cfg := string(sec.Data[configKey])
 	assert.Contains(t, cfg, "hostname: "+testHostname)
@@ -353,6 +355,47 @@ func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "delete and recreate")
 	assert.Contains(t, h.get().Status.Message, "delete and recreate")
+}
+
+// TestModifiedConnectorSecretIsRejectedAndConnectorStopped verifies that
+// cloudflared never continues with credentials or ingress configuration that
+// no longer match the owning AgentEdgeTunnel.
+func TestModifiedConnectorSecretIsRejectedAndConnectorStopped(t *testing.T) {
+	cases := map[string]func(*corev1.Secret){
+		"configuration changed": func(s *corev1.Secret) {
+			s.Data[configKey] = []byte("tunnel: attacker\ningress: []\n")
+		},
+		"credentials changed": func(s *corev1.Secret) {
+			s.Data[credentialsKey] = []byte(`{"AccountTag":"fake-account","TunnelSecret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","TunnelID":"attacker"}`)
+		},
+		"owner removed": func(s *corev1.Secret) {
+			s.OwnerReferences = nil
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			secret, err := h.secret()
+			require.NoError(t, err)
+			mutate(secret)
+			require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+			_, err = h.reconcile()
+			require.Error(t, err)
+			assert.Contains(t, h.get().Status.Message, "connector credentials Secret")
+			_, deploymentErr := h.deployment()
+			assert.True(t, apierrors.IsNotFound(deploymentErr), "connector Deployment must be removed")
+			storedSecret, secretErr := h.secret()
+			if name == "owner removed" {
+				require.NoError(t, secretErr)
+				assert.Nil(t, storedSecret.OwnerReferences, "foreign Secret must be left untouched")
+			} else {
+				assert.True(t, apierrors.IsNotFound(secretErr), "invalid owned Secret must be removed")
+			}
+		})
+	}
 }
 
 // TestTTLExpiryCleansEverythingAndDoesNotReprovision checks: ttl expiry cleans everything and does not reprovision.
