@@ -959,6 +959,14 @@ func (r *AgentEdgeTunnelReconciler) ensureConnector(ctx context.Context, t *agen
 		}
 		return false, err
 	}
+	// Seal valid Secrets created by older operator versions. The update uses
+	// resourceVersion, so a concurrent replacement or modification conflicts.
+	if secret.Immutable == nil || !*secret.Immutable {
+		secret.Immutable = boolPtr(true)
+		if err := r.Update(ctx, &secret); err != nil {
+			return false, fmt.Errorf("making connector credentials Secret immutable: %w", err)
+		}
+	}
 
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: connectorName(t), Namespace: t.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
