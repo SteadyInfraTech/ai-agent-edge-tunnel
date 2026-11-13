@@ -45,7 +45,26 @@ jobs:
         run: go vet ./...
 
       - name: Run Unit Tests (Fake Cloudflare)
-        run: go test -v -race ./...
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Report test coverage
+        if: always() && hashFiles('coverage.out') != ''
+        run: |
+          go tool cover -func=coverage.out | tee coverage.txt
+          total="$(grep '^total:' coverage.txt | awk '{print $3}')"
+          echo "### Go unit-test coverage: $total" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Detailed per-function coverage is available in the coverage artifact.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always() && hashFiles('coverage.out') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: |
+            coverage.out
+            coverage.txt
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Build Operator Binary
         run: go build -o bin/manager ./cmd
