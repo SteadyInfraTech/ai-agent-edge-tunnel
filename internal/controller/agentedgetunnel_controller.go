@@ -1106,6 +1106,15 @@ func (r *AgentEdgeTunnelReconciler) validateOperatorPolicy(t *agentopsv1alpha1.A
 	if t.Spec.Cloudflare.ZoneID != r.ZoneID {
 		return fmt.Errorf("spec.cloudflare.zoneID does not match the operator's configured Cloudflare zone; this operator is pinned to zone %q", r.ZoneID)
 	}
+	// The hostname is derived from operator configuration, not only from the
+	// immutable object spec. A base-domain change must not leave old hostnames
+	// active outside the newly configured exposure boundary.
+	if t.Status.TunnelID != "" && t.Status.Hostname != "" {
+		expectedHostname := r.hostname(t)
+		if t.Status.Hostname != expectedHostname {
+			return fmt.Errorf("recorded hostname %q does not match the operator's configured base domain (expected %q)", t.Status.Hostname, expectedHostname)
+		}
+	}
 	if t.Spec.Security.AllowPublic {
 		if _, allowed := r.PublicNamespaces[t.Namespace]; !allowed {
 			return fmt.Errorf("security.allowPublic is not permitted in namespace %q; add the namespace to EDGE_PUBLIC_NAMESPACES to authorize unauthenticated tunnels", t.Namespace)
