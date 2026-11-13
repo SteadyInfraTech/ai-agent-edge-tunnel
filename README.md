@@ -255,7 +255,13 @@ kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml
 `--watch-namespaces=agents` (env `EDGE_WATCH_NAMESPACES`), so its cache covers only those namespaces, and a `Role`
 and `RoleBinding` in each of them grant the Secret and Deployment access. A compromised operator pod can then read
 Secrets by known name and manage Deployments only in the namespaces you listed. Edit `config/overlays/namespaced/tunnel-namespace.yaml` for your
-namespace(s), repeating the Role and RoleBinding for each, and keep `--watch-namespaces` in sync with them.
+namespace(s), repeating the Role and RoleBinding for each. Also edit
+`config/overlays/namespaced/watch-namespaces-patch.yaml` to set
+`--watch-namespaces` to the same comma-separated namespace list. That patch adds an explicit command-line
+argument, which takes precedence over the `EDGE_WATCH_NAMESPACES` environment variable. If you prefer
+to configure the list through `EDGE_WATCH_NAMESPACES`, remove the explicit `--watch-namespaces`
+argument from the patch; the environment variable supplies the flag's default only when no argument
+overrides it. Keep the Role/RoleBinding namespaces and the effective watch list in sync.
 AgentEdgeTunnel objects in other namespaces are ignored. This is a namespace-level boundary, not isolation
 between tenants that share a managed namespace.
 
@@ -297,6 +303,10 @@ preserve any Cloudflare credentials, configuration, or other namespace data you 
 the Secret and ConfigMap must be recreated if you deploy again. This is not limited to the namespaces
 watched by a namespaced install. On a shared cluster, check ownership with the other teams and confirm
 that no other team owns or relies on any `AgentEdgeTunnel` objects before running it.
+
+The final `kubectl delete -k config/default --ignore-not-found` tolerates resources that were
+already removed, such as the ClusterRole and ClusterRoleBinding when switching from the default install
+to the namespaced overlay. It still deletes the default-install resources that remain.
 
 The command does **not** remove the namespace-scoped Role or RoleBinding created by
 `config/overlays/namespaced/tunnel-namespace.yaml`, nor does it delete managed namespaces such as
