@@ -25,22 +25,10 @@ jobs:
           go-version: '1.27.3'
           cache: true
 
-      - name: Generate and check module files
+      - name: Verify go.mod and go.sum are tidy
         run: |
           go mod tidy
-          if ! git diff --quiet -- go.mod go.sum; then
-            echo "::warning::go mod tidy updated module files; generated files are attached for bootstrap."
-          fi
-
-      - name: Upload generated module files (temporary)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-module-files
-          path: |
-            go.mod
-            go.sum
-          retention-days: 1
+          git diff --exit-code go.mod go.sum
 
       - name: Check formatting
         run: |
