@@ -123,6 +123,21 @@ func (r *AgentEdgeTunnelReconciler) reconcileSession(ctx context.Context, t *age
 		}
 		return ctrl.Result{}, true, fmt.Errorf("the AgentSession kind %s is not installed: %w", agentSessionGVK.GroupKind(), err)
 	case err != nil:
+		if pinned && t.Status.Phase == agentopsv1alpha1.PhaseActive {
+			// A transient API error does not prove that the session ended. Keep
+			// the tunnel's independent TTL, Service, Access-policy, and connector
+			// safeguards running while polling the session again at its normal
+			// interval. Confirmed terminal states are still handled above.
+			log.FromContext(ctx).Error(err, "Unable to read AgentSession; continuing active tunnel safeguards", "session", t.Spec.SessionRef.Name)
+			res, activeErr := r.reconcileActive(ctx, t)
+			if activeErr != nil {
+				return res, true, fmt.Errorf("reading AgentSession %q: %w; active tunnel safeguards: %v", t.Spec.SessionRef.Name, err, activeErr)
+			}
+			if res.RequeueAfter == 0 || res.RequeueAfter > sessionPollInterval {
+				res.RequeueAfter = sessionPollInterval
+			}
+			return res, true, nil
+		}
 		return ctrl.Result{}, true, err
 	}
 
