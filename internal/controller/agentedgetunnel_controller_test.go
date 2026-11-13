@@ -357,6 +357,26 @@ func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	assert.Contains(t, h.get().Status.Message, "delete and recreate")
 }
 
+// TestExistingConnectorSecretIsSealed verifies that valid credentials
+// created before Secret immutability was introduced are sealed in place.
+func TestExistingConnectorSecretIsSealed(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+
+	secret, err := h.secret()
+	require.NoError(t, err)
+	secret.Immutable = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	sealed, err := h.secret()
+	require.NoError(t, err)
+	require.NotNil(t, sealed.Immutable)
+	assert.True(t, *sealed.Immutable)
+}
+
 // TestModifiedConnectorSecretIsRejectedAndConnectorStopped verifies that
 // cloudflared never continues with credentials or ingress configuration that
 // no longer match the owning AgentEdgeTunnel.
