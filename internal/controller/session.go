@@ -131,7 +131,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileSession(ctx context.Context, t *age
 			log.FromContext(ctx).Error(err, "Unable to read AgentSession; continuing active tunnel safeguards", "session", t.Spec.SessionRef.Name)
 			res, activeErr := r.reconcileActive(ctx, t)
 			if activeErr != nil {
-				return res, true, fmt.Errorf("reading AgentSession %q: %w; active tunnel safeguards: %v", t.Spec.SessionRef.Name, err, activeErr)
+				return res, true, fmt.Errorf("reading AgentSession %q: %w; active tunnel safeguards: %w", t.Spec.SessionRef.Name, err, activeErr)
 			}
 			if t.Status.Phase == agentopsv1alpha1.PhaseActive && (res.RequeueAfter == 0 || res.RequeueAfter > sessionPollInterval) {
 				res.RequeueAfter = sessionPollInterval
