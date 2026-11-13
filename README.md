@@ -104,10 +104,19 @@ unstructured, so this operator does not depend on agentops-operator and starts w
   object (garbage-collected with it) with mode `0440`; they never appear in args, env vars or `kubectl describe`.
 - **Hardened connector pod:** non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault`
   seccomp, no service account token.
-- **Least-privilege operator.** It can `get/create/update/delete` Secrets but not `list` or `watch` them, so it
-  cannot enumerate Secrets in the cluster. Its cache is disabled for Secrets to make that work.
-  **Limit of the default install:** its ClusterRole is cluster-wide, so a compromised operator pod could still
-  `get` a Secret in any namespace if it knew the name. For a tighter boundary use the namespaced install below.
+- **Operator RBAC and blast radius.** The operator can `get/create/update/delete` Secrets but not `list` or
+  `watch` them, so it cannot enumerate Secrets. Its cache is disabled for Secrets to make that work. This is
+  not a namespace boundary in the default install: the default ClusterRole is cluster-wide and permits the
+  operator to `get` Secrets by known name and to create, update, patch, or delete Deployments in **any**
+  namespace. A compromised operator pod could therefore read known Secret names and change workloads
+  cluster-wide, in addition to managing AgentEdgeTunnel resources. Treat the operator and its Cloudflare
+  credentials as cluster-privileged components; isolate its pod, restrict who can modify its configuration
+  and watched resources, and do not install it into a multi-tenant cluster with the default overlay unless
+  that blast radius is intentional. For a narrower boundary, use the namespaced install below. The
+  namespaced overlay removes the ClusterRole and ClusterRoleBinding and grants equivalent access only
+  through namespace-local Roles and RoleBindings in explicitly listed namespaces. It limits Secret and
+  Deployment access to those namespaces; it does not make the operator safe to share with mutually
+  untrusted tenants inside a namespace it manages.
 - **No adoption.** The operator refuses to overwrite a Secret, Deployment or DNS record it does not own.
 - **Immutable once created:** `spec.service`, `spec.security` and `spec.cloudflare` cannot change after the
   tunnel exists; delete and recreate instead.
@@ -242,12 +251,13 @@ kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml
 
 #### Namespace-scoped install
 
-`make deploy-namespaced IMG=<image>` (or `kubectl apply -k config/overlays/namespaced`, which uses the checked-in image) installs the operator with no ClusterRole at all. It runs with
+`make deploy-namespaced IMG=<image>` (or `kubectl apply -k config/overlays/namespaced`, which uses the checked-in image) installs the operator with no ClusterRole or ClusterRoleBinding. **Prefer this mode for production clusters that host multiple teams or trust domains**, unless cluster-wide workload management is an explicit requirement. It runs with
 `--watch-namespaces=agents` (env `EDGE_WATCH_NAMESPACES`), so its cache covers only those namespaces, and a `Role`
 and `RoleBinding` in each of them grant the Secret and Deployment access. A compromised operator pod can then read
-Secrets only in the namespaces you listed. Edit `config/overlays/namespaced/tunnel-namespace.yaml` for your
+Secrets by known name and manage Deployments only in the namespaces you listed. Edit `config/overlays/namespaced/tunnel-namespace.yaml` for your
 namespace(s), repeating the Role and RoleBinding for each, and keep `--watch-namespaces` in sync with them.
-AgentEdgeTunnel objects in other namespaces are ignored. `make undeploy` removes either install.
+AgentEdgeTunnel objects in other namespaces are ignored. This is a namespace-level boundary, not isolation
+between tenants that share a managed namespace. `make undeploy` removes either install.
 
 `make deploy` sets the manager image to `IMG` on a temporary copy of `config/`. To remove everything, use
 `make undeploy`: it deletes all `AgentEdgeTunnel` objects and waits for their Cloudflare cleanup before it
