@@ -893,9 +893,45 @@ func (r *AgentEdgeTunnelReconciler) writeConnectorSecret(ctx context.Context, t 
 			credentialsKey: creds,
 			configKey:      []byte(connectorConfig(info.ID, hostname, svc, t.Namespace)),
 		}
+		// Connector credentials are long-lived and must not be mutable after
+		// provisioning. Existing valid Secrets are sealed on their next write.
+		secret.Immutable = boolPtr(true)
 		return controllerutil.SetControllerReference(t, secret, r.Scheme)
 	})
 	return err
+}
+
+// validateConnectorSecret verifies that the Secret consumed by cloudflared is
+// still controlled by this tunnel and contains exactly the credentials and
+// ingress configuration expected from its recorded status and spec.
+func (r *AgentEdgeTunnelReconciler) validateConnectorSecret(secret *corev1.Secret, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	if !metav1.IsControlledBy(secret, t) {
+		return fmt.Errorf("connector credentials Secret %q is not managed by this AgentEdgeTunnel; refusing to use it", secret.Name)
+	}
+	var creds struct {
+		AccountTag   string
+		TunnelSecret string
+		TunnelID     string
+	}
+	if err := json.Unmarshal(secret.Data[credentialsKey], &creds); err != nil {
+		return fmt.Errorf("connector credentials Secret %q contains invalid credentials JSON", secret.Name)
+	}
+	secretBytes, err := base64.StdEncoding.DecodeString(creds.TunnelSecret)
+	if err != nil || len(secretBytes) != 32 {
+		return fmt.Errorf("connector credentials Secret %q contains an invalid tunnel secret", secret.Name)
+	}
+	if creds.AccountTag != r.AccountID || creds.TunnelID != t.Status.TunnelID {
+		return fmt.Errorf("connector credentials Secret %q does not match the recorded Cloudflare account and tunnel", secret.Name)
+	}
+	svc, err := target(t)
+	if err != nil {
+		return err
+	}
+	wantConfig := connectorConfig(t.Status.TunnelID, t.Status.Hostname, svc, t.Namespace)
+	if string(secret.Data[configKey]) != wantConfig {
+		return fmt.Errorf("connector credentials Secret %q contains configuration that does not match the AgentEdgeTunnel spec", secret.Name)
+	}
+	return nil
 }
 
 // ensureConnector keeps the cloudflared Deployment in its desired state and
@@ -911,6 +947,15 @@ func (r *AgentEdgeTunnelReconciler) ensureConnector(ctx context.Context, t *agen
 	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &secret); err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			return false, fmt.Errorf("connector credentials Secret %q is missing; Cloudflare returns them only once, so delete and recreate this AgentEdgeTunnel", connectorName(t))
+		}
+		return false, err
+	}
+	if err := r.validateConnectorSecret(&secret, t); err != nil {
+		// A replaced or modified Secret must never be consumed by cloudflared.
+		// Remove the owned Deployment before returning; foreign Secrets are left
+		// untouched by deleteConnector.
+		if cleanupErr := r.deleteConnector(ctx, t); cleanupErr != nil {
+			return false, errors.Join(err, fmt.Errorf("removing connector with invalid credentials: %w", cleanupErr))
 		}
 		return false, err
 	}
