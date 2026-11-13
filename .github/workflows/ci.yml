@@ -78,8 +78,8 @@ jobs:
           grep -q '^  name: edge-tunnel-quota-admin-policy$' /tmp/default.yaml
           grep -q '^  name: edge-tunnel-quota-status-policy$' /tmp/default.yaml
           grep -q '^  name: edge-tunnel-finalizer-policy$' /tmp/default.yaml
-          grep -qE -- '^ *- --metrics-bind-address=0
-          if grep -qE -- '^ *(- )?name: metrics
+          grep -qE "^ *- --metrics-bind-address=0$" /tmp/default.yaml
+          if grep -qE "^ *(- )?name: metrics$" /tmp/default.yaml; then
             echo 'the default deployment must not declare a metrics container port'
             exit 1
           fi
