@@ -1305,6 +1305,32 @@ func TestZoneMismatchFailsBeforeProvisioning(t *testing.T) {
 	assert.Zero(t, h.cf.CreateTunnelCalls)
 }
 
+// TestChangingBaseDomainTerminatesExistingTunnel verifies an operator
+// configuration change cannot leave a hostname active outside the new boundary.
+func TestChangingBaseDomainTerminatesExistingTunnel(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	require.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	require.Equal(t, "agent-job-001.agents.example.com", h.get().Status.Hostname)
+	require.Len(t, h.cf.Tunnels, 1)
+	require.Len(t, h.cf.DNSRecords, 1)
+	require.Len(t, h.cf.AccessApps, 1)
+
+	// The manager reads EDGE_BASE_DOMAIN at startup. Simulate its restart with
+	// the updated configuration and reconcile the existing object.
+	h.r.BaseDomain = "new-agents.example.com"
+	_, err = h.reconcile()
+	require.NoError(t, err)
+
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "configured base domain")
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.DNSRecords)
+	assert.Empty(t, h.cf.AccessApps)
+	h.assertConnectorGone()
+}
+
 // TestPublicTunnelRequiresNamespaceAllowlist ensures allowPublic is not an
 // authorization decision available to every namespace by default.
 func TestPublicTunnelRequiresNamespaceAllowlist(t *testing.T) {
