@@ -1,7 +1,5 @@
 # ai-agent-edge-tunnel
 
-# ai-agent-edge-tunnel
-
 `ai-agent-edge-tunnel` is a Kubernetes operator designed to provision short-lived Cloudflare Zero Trust Tunnels, DNS routes, and Access policies specifically for ephemeral AI Agent microservices (e.g., AutoGen, LangGraph, CrewAI).
 
 ## How it works
