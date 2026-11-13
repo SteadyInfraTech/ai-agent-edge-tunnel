@@ -104,10 +104,19 @@ unstructured, so this operator does not depend on agentops-operator and starts w
   object (garbage-collected with it) with mode `0440`; they never appear in args, env vars or `kubectl describe`.
 - **Hardened connector pod:** non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault`
   seccomp, no service account token.
-- **Least-privilege operator.** It can `get/create/update/delete` Secrets but not `list` or `watch` them, so it
-  cannot enumerate Secrets in the cluster. Its cache is disabled for Secrets to make that work.
-  **Limit of the default install:** its ClusterRole is cluster-wide, so a compromised operator pod could still
-  `get` a Secret in any namespace if it knew the name. For a tighter boundary use the namespaced install below.
+- **Operator RBAC and blast radius.** The operator can `get/create/update/delete` Secrets but not `list` or
+  `watch` them, so it cannot enumerate Secrets. Its cache is disabled for Secrets to make that work. This is
+  not a namespace boundary in the default install: the default ClusterRole is cluster-wide and permits the
+  operator to `get` Secrets by known name and to create, update, patch, or delete Deployments in **any**
+  namespace. A compromised operator pod could therefore read known Secret names and change workloads
+  cluster-wide, in addition to managing AgentEdgeTunnel resources. Treat the operator and its Cloudflare
+  credentials as cluster-privileged components; isolate its pod, restrict who can modify its configuration
+  and watched resources, and do not install it into a multi-tenant cluster with the default overlay unless
+  that blast radius is intentional. For a narrower boundary, use the namespaced install below. The
+  namespaced overlay removes the ClusterRole and ClusterRoleBinding and grants equivalent access only
+  through namespace-local Roles and RoleBindings in explicitly listed namespaces. It limits Secret and
+  Deployment access to those namespaces; it does not make the operator safe to share with mutually
+  untrusted tenants inside a namespace it manages.
 - **No adoption.** The operator refuses to overwrite a Secret, Deployment or DNS record it does not own.
 - **Immutable once created:** `spec.service`, `spec.security` and `spec.cloudflare` cannot change after the
   tunnel exists; delete and recreate instead.
@@ -242,16 +251,89 @@ kubectl apply -f config/samples/edge_v1alpha1_agentedgetunnel.yaml
 
 #### Namespace-scoped install
 
-`make deploy-namespaced IMG=<image>` (or `kubectl apply -k config/overlays/namespaced`, which uses the checked-in image) installs the operator with no ClusterRole at all. It runs with
+`make deploy-namespaced IMG=<image>` (or `kubectl apply -k config/overlays/namespaced`, which uses the checked-in image) installs the operator with no ClusterRole or ClusterRoleBinding. **Prefer this mode for production clusters that host multiple teams or trust domains**, unless cluster-wide workload management is an explicit requirement. It runs with
 `--watch-namespaces=agents` (env `EDGE_WATCH_NAMESPACES`), so its cache covers only those namespaces, and a `Role`
 and `RoleBinding` in each of them grant the Secret and Deployment access. A compromised operator pod can then read
-Secrets only in the namespaces you listed. Edit `config/overlays/namespaced/tunnel-namespace.yaml` for your
-namespace(s), repeating the Role and RoleBinding for each, and keep `--watch-namespaces` in sync with them.
-AgentEdgeTunnel objects in other namespaces are ignored. `make undeploy` removes either install.
+Secrets by known name and manage Deployments only in the namespaces you listed. Edit `config/overlays/namespaced/tunnel-namespace.yaml` for your
+namespace(s), repeating the Role and RoleBinding for each. To configure the watch list through `EDGE_WATCH_NAMESPACES` instead of a command-line
+argument, remove `config/overlays/namespaced/watch-namespaces-patch.yaml` and remove its
+`patches` entry from `config/overlays/namespaced/kustomization.yaml`. Then add
+`EDGE_WATCH_NAMESPACES` to the `edge-tunnel-config` ConfigMap in `edge-tunnel-system`,
+using the same comma-separated namespace list as the namespace-local Roles and RoleBindings.
+For example, when creating the ConfigMap, include:
 
-`make deploy` sets the manager image to `IMG` on a temporary copy of `config/`. To remove everything, use
-`make undeploy`: it deletes all `AgentEdgeTunnel` objects and waits for their Cloudflare cleanup before it
-removes the manager and the CRD, so nothing is left running in Cloudflare.
+```bash
+--from-literal=EDGE_WATCH_NAMESPACES=agents,other-managed-namespace
+```
+
+The ConfigMap is loaded into the manager's environment, and `EDGE_WATCH_NAMESPACES` supplies
+the default for `--watch-namespaces` when no explicit command-line argument overrides it.
+After changing the ConfigMap, restart the manager Deployment so its containers load the updated
+environment value:
+
+```bash
+kubectl -n edge-tunnel-system rollout restart deployment/edge-tunnel-controller-manager
+```
+
+Keep the Role/RoleBinding namespaces and the effective watch list in sync.
+AgentEdgeTunnel objects in other namespaces are ignored. This is a namespace-level boundary, not isolation
+between tenants that share a managed namespace.
+
+**Switching from the default install:** before applying the namespaced overlay, inspect all existing
+tunnels and their namespaces:
+
+```bash
+kubectl get agentedgetunnels --all-namespaces
+```
+
+Every namespace containing a tunnel that should remain managed must be included in both the overlay's
+namespace-local Role/RoleBinding resources and the manager's `--watch-namespaces` list
+(`EDGE_WATCH_NAMESPACES`). Otherwise, the namespaced operator ignores those objects; it cannot
+reconcile them or complete their finalizer cleanup. Keep those namespaces in the watch list, or migrate
+the tunnel workloads and recreate their AgentEdgeTunnel objects in managed namespaces, or clean up the
+tunnels while the existing operator still watches them. Do not switch the watch list and leave live
+tunnels behind in unwatched namespaces.
+
+Applying the namespaced overlay does not prune resources that are present in the old install but absent
+from the overlay. After the namespaced install is working and its namespace-local Roles and RoleBindings
+are in place, explicitly remove the old cluster-wide grant:
+
+```bash
+kubectl delete clusterrole edge-tunnel-manager-role
+kubectl delete clusterrolebinding edge-tunnel-manager-rolebinding
+```
+
+Confirm the current cluster context and that these resources belong to this operator before deleting them.
+Do not leave them behind: the namespaced overlay's rendered manifests omit them, but a normal
+`kubectl apply -k` does not delete previously applied resources.
+
+`make deploy` sets the manager image to `IMG` on a temporary copy of `config/`. **Use
+`make undeploy` with care:** it first deletes every `AgentEdgeTunnel` object in every namespace
+(`--all-namespaces`) and waits for finalizer cleanup, then deletes the resources in
+`config/default`, including the manager, CRD, default cluster-wide RBAC, and the
+`edge-tunnel-system` Namespace. Deleting that Namespace also deletes everything in it, including the
+Quickstart `edge-tunnel-cloudflare` Secret and `edge-tunnel-config` ConfigMap. Back up or otherwise
+preserve any Cloudflare credentials, configuration, or other namespace data you still need before teardown;
+the Secret and ConfigMap must be recreated if you deploy again. This is not limited to the namespaces
+watched by a namespaced install. On a shared cluster, check ownership with the other teams and confirm
+that no other team owns or relies on any `AgentEdgeTunnel` objects before running it.
+
+The final `kubectl delete -k config/default --ignore-not-found` tolerates resources that were
+already removed, such as the ClusterRole and ClusterRoleBinding when switching from the default install
+to the namespaced overlay. It still deletes the default-install resources that remain.
+
+The command does **not** remove the namespace-scoped Role or RoleBinding created by
+`config/overlays/namespaced/tunnel-namespace.yaml`, nor does it delete managed namespaces such as
+`agents`. After the tunnel cleanup and manager teardown have completed, remove the namespaced RBAC
+resources yourself in each managed namespace if they are no longer needed. For the example namespace:
+
+```bash
+kubectl delete role edge-tunnel-manager-role -n agents
+kubectl delete rolebinding edge-tunnel-manager-rolebinding -n agents
+```
+
+Repeat for each namespace configured in the overlay. The namespace itself is retained; delete it separately
+only if it is dedicated to this operator and you have confirmed that it contains no other workloads or data.
 
 ### Local Development & Testing
 

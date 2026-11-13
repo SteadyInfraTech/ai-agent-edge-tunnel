@@ -48,7 +48,7 @@ deploy-namespaced:
 # manager before it could clean up and leave the objects stuck.
 undeploy:
 	kubectl delete agentedgetunnels --all --all-namespaces --wait=true --timeout=10m
-	kubectl delete -k config/default
+	kubectl delete -k config/default --ignore-not-found
 
 manifests:
 	@echo "CRD manifests located in config/crd/bases/"
