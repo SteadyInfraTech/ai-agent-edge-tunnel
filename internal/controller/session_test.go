@@ -334,7 +334,7 @@ func TestActiveSessionTunnelKeepsSafeguardsRunningWhenSessionReadFails(t *testin
 
 	res, err := h.reconcile()
 	require.NoError(t, err)
-	assert.Equal(t, sessionPollInterval, res.RequeueAfter)
+	assert.Zero(t, res.RequeueAfter, "a tunnel terminated by TTL should not be requeued")
 	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
 	assert.Contains(t, h.get().Status.Message, "TTL")
 	assert.Empty(t, h.cf.Tunnels)
