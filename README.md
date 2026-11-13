@@ -259,9 +259,24 @@ namespace(s), repeating the Role and RoleBinding for each, and keep `--watch-nam
 AgentEdgeTunnel objects in other namespaces are ignored. This is a namespace-level boundary, not isolation
 between tenants that share a managed namespace.
 
-**Switching from the default install:** applying the namespaced overlay does not prune resources that are
-present in the old install but absent from the overlay. After the namespaced install is working and its
-namespace-local Roles and RoleBindings are in place, explicitly remove the old cluster-wide grant:
+**Switching from the default install:** before applying the namespaced overlay, inspect all existing
+tunnels and their namespaces:
+
+```bash
+kubectl get agentedgetunnels --all-namespaces
+```
+
+Every namespace containing a tunnel that should remain managed must be included in both the overlay's
+namespace-local Role/RoleBinding resources and the manager's `--watch-namespaces` list
+(`EDGE_WATCH_NAMESPACES`). Otherwise, the namespaced operator ignores those objects; it cannot
+reconcile them or complete their finalizer cleanup. Keep those namespaces in the watch list, or migrate
+the tunnel workloads and recreate their AgentEdgeTunnel objects in managed namespaces, or clean up the
+tunnels while the existing operator still watches them. Do not switch the watch list and leave live
+tunnels behind in unwatched namespaces.
+
+Applying the namespaced overlay does not prune resources that are present in the old install but absent
+from the overlay. After the namespaced install is working and its namespace-local Roles and RoleBindings
+are in place, explicitly remove the old cluster-wide grant:
 
 ```bash
 kubectl delete clusterrole edge-tunnel-manager-role
@@ -275,9 +290,13 @@ Do not leave them behind: the namespaced overlay's rendered manifests omit them,
 `make deploy` sets the manager image to `IMG` on a temporary copy of `config/`. **Use
 `make undeploy` with care:** it first deletes every `AgentEdgeTunnel` object in every namespace
 (`--all-namespaces`) and waits for finalizer cleanup, then deletes the resources in
-`config/default`, including the manager, CRD, and default cluster-wide RBAC. This is not limited to the
-namespaces watched by a namespaced install. On a shared cluster, check ownership with the other teams and
-confirm that no other team owns or relies on any `AgentEdgeTunnel` objects before running it.
+`config/default`, including the manager, CRD, default cluster-wide RBAC, and the
+`edge-tunnel-system` Namespace. Deleting that Namespace also deletes everything in it, including the
+Quickstart `edge-tunnel-cloudflare` Secret and `edge-tunnel-config` ConfigMap. Back up or otherwise
+preserve any Cloudflare credentials, configuration, or other namespace data you still need before teardown;
+the Secret and ConfigMap must be recreated if you deploy again. This is not limited to the namespaces
+watched by a namespaced install. On a shared cluster, check ownership with the other teams and confirm
+that no other team owns or relies on any `AgentEdgeTunnel` objects before running it.
 
 The command does **not** remove the namespace-scoped Role or RoleBinding created by
 `config/overlays/namespaced/tunnel-namespace.yaml`, nor does it delete managed namespaces such as
