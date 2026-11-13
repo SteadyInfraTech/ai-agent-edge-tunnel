@@ -268,6 +268,13 @@ For example, when creating the ConfigMap, include:
 
 The ConfigMap is loaded into the manager's environment, and `EDGE_WATCH_NAMESPACES` supplies
 the default for `--watch-namespaces` when no explicit command-line argument overrides it.
+After changing the ConfigMap, restart the manager Deployment so its containers load the updated
+environment value:
+
+```bash
+kubectl -n edge-tunnel-system rollout restart deployment/edge-tunnel-controller-manager
+```
+
 Keep the Role/RoleBinding namespaces and the effective watch list in sync.
 AgentEdgeTunnel objects in other namespaces are ignored. This is a namespace-level boundary, not isolation
 between tenants that share a managed namespace.
