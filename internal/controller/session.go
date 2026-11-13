@@ -133,7 +133,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileSession(ctx context.Context, t *age
 			if activeErr != nil {
 				return res, true, fmt.Errorf("reading AgentSession %q: %w; active tunnel safeguards: %v", t.Spec.SessionRef.Name, err, activeErr)
 			}
-			if res.RequeueAfter == 0 || res.RequeueAfter > sessionPollInterval {
+			if t.Status.Phase == agentopsv1alpha1.PhaseActive && (res.RequeueAfter == 0 || res.RequeueAfter > sessionPollInterval) {
 				res.RequeueAfter = sessionPollInterval
 			}
 			return res, true, nil
