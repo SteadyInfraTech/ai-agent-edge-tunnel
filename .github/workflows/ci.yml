@@ -72,6 +72,7 @@ jobs:
       - name: Render Kubernetes manifests
         run: |
           kubectl kustomize config/default > /tmp/default.yaml
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
           grep -q '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml
           test "$(grep -c '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml)" -eq 4
           test "$(grep -c '^kind: ValidatingAdmissionPolicyBinding$' /tmp/default.yaml)" -eq 4
