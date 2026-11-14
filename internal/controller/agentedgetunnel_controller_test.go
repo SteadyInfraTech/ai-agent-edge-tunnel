@@ -203,6 +203,8 @@ func TestProvisionsProtectedTunnelWithConnector(t *testing.T) {
 	sec, err := h.secret()
 	require.NoError(t, err)
 	assert.True(t, metav1.IsControlledBy(sec, &got))
+	require.NotNil(t, sec.Immutable)
+	assert.True(t, *sec.Immutable, "connector credentials must be immutable")
 	assert.Contains(t, string(sec.Data[credentialsKey]), got.Status.TunnelID)
 	cfg := string(sec.Data[configKey])
 	assert.Contains(t, cfg, "hostname: "+testHostname)
@@ -339,6 +341,80 @@ func TestForeignSecretFailsBeforeCreatingATunnel(t *testing.T) {
 	assert.Empty(t, sec.Data, "the foreign Secret must be untouched")
 }
 
+// flakySecretCreateClient simulates an API timeout either before or after
+// the API server persists a newly-created connector Secret.
+type flakySecretCreateClient struct {
+	client.Client
+	stored bool
+	failed bool
+}
+
+func (c *flakySecretCreateClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*corev1.Secret); ok && !c.failed {
+		c.failed = true
+		if c.stored {
+			if err := c.Client.Create(ctx, obj, opts...); err != nil {
+				return err
+			}
+		}
+		return errors.New("etcdserver: request timed out")
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+// TestAmbiguousConnectorSecretWriteRecoversPersistedCredentials verifies
+// that a committed Secret and its Cloudflare tunnel survive an ambiguous
+// create response and are reused on the next reconcile.
+func TestAmbiguousConnectorSecretWriteRecoversPersistedCredentials(t *testing.T) {
+	h := newHarness(t, nil)
+	h.r.Client = &flakySecretCreateClient{Client: h.k8s, stored: true}
+
+	_, err := h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "storing connector credentials")
+	assert.Len(t, h.cf.Tunnels, 1, "the tunnel backing the possibly-persisted credentials must be kept")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls)
+	assert.Empty(t, h.get().Status.TunnelID)
+
+	secretBefore, err := h.secret()
+	require.NoError(t, err)
+	require.NotNil(t, secretBefore.Immutable)
+	require.True(t, *secretBefore.Immutable)
+	dataBefore := map[string][]byte{}
+	for key, value := range secretBefore.Data {
+		dataBefore[key] = append([]byte(nil), value...)
+	}
+
+	h.r.Client = h.k8s
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "the retry must recover rather than create another tunnel")
+	secretAfter, err := h.secret()
+	require.NoError(t, err)
+	assert.Equal(t, dataBefore, secretAfter.Data, "recovery must not rewrite immutable Secret data")
+	assert.True(t, *secretAfter.Immutable)
+}
+
+// TestAmbiguousConnectorSecretWriteWithoutCommitDoesNotDuplicateTunnel ensures
+// a tunnel is not duplicated when the Secret write definitely did not commit.
+func TestAmbiguousConnectorSecretWriteWithoutCommitDoesNotDuplicateTunnel(t *testing.T) {
+	h := newHarness(t, nil)
+	h.r.Client = &flakySecretCreateClient{Client: h.k8s, stored: false}
+
+	_, err := h.reconcile()
+	require.Error(t, err)
+	assert.Len(t, h.cf.Tunnels, 1, "the tunnel is retained because the write outcome may be ambiguous")
+	assert.Empty(t, h.get().Status.TunnelID)
+
+	h.r.Client = h.k8s
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership cannot be established")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "the unrecoverable orphan must not trigger another create")
+	assert.Len(t, h.cf.Tunnels, 1, "the unproven tunnel must remain untouched")
+}
+
 // TestMissingConnectorSecretIsReportedNotSilentlyIgnored checks: missing connector secret is reported not silently ignored.
 func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	h := newHarness(t, nil)
@@ -353,6 +429,69 @@ func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "delete and recreate")
 	assert.Contains(t, h.get().Status.Message, "delete and recreate")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "owned Deployment must be removed when credentials are missing")
+}
+
+// TestExistingConnectorSecretIsSealed verifies that valid credentials
+// created before Secret immutability was introduced are sealed in place.
+func TestExistingConnectorSecretIsSealed(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+
+	secret, err := h.secret()
+	require.NoError(t, err)
+	secret.Immutable = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	sealed, err := h.secret()
+	require.NoError(t, err)
+	require.NotNil(t, sealed.Immutable)
+	assert.True(t, *sealed.Immutable)
+}
+
+// TestModifiedConnectorSecretIsRejectedAndConnectorStopped verifies that
+// cloudflared never continues with credentials or ingress configuration that
+// no longer match the owning AgentEdgeTunnel.
+func TestModifiedConnectorSecretIsRejectedAndConnectorStopped(t *testing.T) {
+	cases := map[string]func(*corev1.Secret){
+		"configuration changed": func(s *corev1.Secret) {
+			s.Data[configKey] = []byte("tunnel: attacker\ningress: []\n")
+		},
+		"credentials changed": func(s *corev1.Secret) {
+			s.Data[credentialsKey] = []byte(`{"AccountTag":"fake-account","TunnelSecret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","TunnelID":"attacker"}`)
+		},
+		"owner removed": func(s *corev1.Secret) {
+			s.OwnerReferences = nil
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			secret, err := h.secret()
+			require.NoError(t, err)
+			mutate(secret)
+			require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+			_, err = h.reconcile()
+			require.Error(t, err)
+			assert.Contains(t, h.get().Status.Message, "connector credentials Secret")
+			_, deploymentErr := h.deployment()
+			assert.True(t, apierrors.IsNotFound(deploymentErr), "connector Deployment must be removed")
+			storedSecret, secretErr := h.secret()
+			if name == "owner removed" {
+				require.NoError(t, secretErr)
+				assert.Nil(t, storedSecret.OwnerReferences, "foreign Secret must be left untouched")
+			} else {
+				assert.True(t, apierrors.IsNotFound(secretErr), "invalid owned Secret must be removed")
+			}
+		})
+	}
 }
 
 // TestTTLExpiryCleansEverythingAndDoesNotReprovision checks: ttl expiry cleans everything and does not reprovision.
@@ -564,6 +703,62 @@ func TestRealModeDiscardsStatusWrittenByDryRun(t *testing.T) {
 	assert.Empty(t, got.Status.TunnelID, "fake IDs must not stay authoritative")
 	assert.Empty(t, got.Status.Phase, "the object must be provisioned again, not left Active")
 	assert.Contains(t, h.cf.Tunnels, fakeID, "a real operator must not pretend to delete a fake tunnel")
+	h.assertConnectorGone()
+}
+
+// TestRealModePreservesForeignConnectorSecret verifies mode switching removes
+// the owned Deployment but never deletes a Secret whose ownership was changed.
+func TestRealModePreservesForeignConnectorSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+
+	secret, err := h.secret()
+	require.NoError(t, err)
+	originalData := map[string][]byte{}
+	for key, value := range secret.Data {
+		originalData[key] = append([]byte(nil), value...)
+	}
+	secret.OwnerReferences = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	h.r.DryRun = false
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.True(t, res.Requeue)
+	assert.Empty(t, h.get().Status.TunnelID)
+
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "owned connector Deployment should be removed")
+	preserved, secretErr := h.secret()
+	require.NoError(t, secretErr)
+	assert.Empty(t, preserved.OwnerReferences, "foreign Secret ownership must remain untouched")
+	assert.Equal(t, originalData, preserved.Data, "foreign Secret data must remain untouched")
+}
+
+// TestRealModeRetainsFakeStatusWhenConnectorCleanupFails ensures a failed
+// resource deletion cannot advance the mode switch or discard its retry state.
+func TestRealModeRetainsFakeStatusWhenConnectorCleanupFails(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	fakeID := h.get().Status.TunnelID
+
+	h.r.DryRun = false
+	h.r.Client = &failingDeploymentDeleteClient{Client: h.k8s, err: errors.New("deployment deletion blocked")}
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "removing dry-run connector resources")
+	assert.Equal(t, fakeID, h.get().Status.TunnelID, "fake status must remain so cleanup can be retried")
+	_, secretErr := h.secret()
+	assert.NoError(t, secretErr, "the Secret must not be deleted after Deployment cleanup fails")
+
+	h.r.Client = h.k8s
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.True(t, res.Requeue)
+	assert.Empty(t, h.get().Status.TunnelID)
+	h.assertConnectorGone()
 }
 
 // TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp checks: real mode deletes dry run object without pretending to clean up.
@@ -959,6 +1154,33 @@ func orphanTunnel(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel)) 
 	return h
 }
 
+// TestPersistedImmutableSecretPreventsDuplicateTunnelWhenLookupMisses ensures
+// a transiently invisible tunnel does not cause another tunnel to be created
+// or the immutable credentials to be overwritten.
+func TestPersistedImmutableSecretPreventsDuplicateTunnelWhenLookupMisses(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	secretBefore, err := h.secret()
+	require.NoError(t, err)
+	require.NotNil(t, secretBefore.Immutable)
+	require.True(t, *secretBefore.Immutable)
+	dataBefore := map[string][]byte{}
+	for key, value := range secretBefore.Data {
+		dataBefore[key] = append([]byte(nil), value...)
+	}
+	for id := range h.cf.Tunnels {
+		delete(h.cf.Tunnels, id) // simulate a temporarily incomplete Cloudflare lookup
+	}
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no matching Cloudflare tunnel can be recovered")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "an existing immutable Secret must prevent creating a second tunnel")
+	secretAfter, getErr := h.secret()
+	require.NoError(t, getErr)
+	assert.Equal(t, dataBefore, secretAfter.Data, "persisted credentials must remain unchanged")
+	assert.True(t, *secretAfter.Immutable)
+}
+
 // TestDeletingAnOrphanTunnelRecoversAndCleansItUp covers deletion after
 // Cloudflare created a tunnel and the status write that records its ID was lost.
 func TestDeletingAnOrphanTunnelRecoversAndCleansItUp(t *testing.T) {
@@ -1267,8 +1489,198 @@ func (c *failingDeploymentDeleteClient) Delete(ctx context.Context, obj client.O
 	return c.Client.Delete(ctx, obj, opts...)
 }
 
+// replacingObjectOnDeleteClient simulates deletion/recreation after the
+// controller's ownership read but before its Delete request.
+type replacingObjectOnDeleteClient struct {
+	client.Client
+	kind string
+}
+
+func (c *replacingObjectOnDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	matches := false
+	switch c.kind {
+	case "Deployment":
+		_, matches = obj.(*appsv1.Deployment)
+	case "Secret":
+		_, matches = obj.(*corev1.Secret)
+	}
+	if !matches {
+		return c.Client.Delete(ctx, obj, opts...)
+	}
+	current := obj.DeepCopyObject().(client.Object)
+	if err := c.Client.Delete(ctx, current); err != nil {
+		return err
+	}
+	replacement := obj.DeepCopyObject().(client.Object)
+	replacement.SetUID(types.UID("replacement-uid"))
+	replacement.SetResourceVersion("")
+	replacement.SetOwnerReferences(nil)
+	if err := c.Client.Create(ctx, replacement); err != nil {
+		return err
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+// TestDeleteConnectorUsesPreconditions ensures a resource replaced after the
+// ownership check is not deleted using the stale object.
+func TestDeleteConnectorUsesPreconditions(t *testing.T) {
+	for _, kind := range []string{"Deployment", "Secret"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newHarness(t, nil)
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			var obj client.Object
+			if kind == "Deployment" {
+				obj, err = h.deployment()
+			} else {
+				dep, getErr := h.deployment()
+				require.NoError(t, getErr)
+				require.NoError(t, h.k8s.Delete(context.Background(), dep))
+				obj, err = h.secret()
+			}
+			require.NoError(t, err)
+			obj.SetUID(types.UID("owned-" + strings.ToLower(kind)))
+			require.NoError(t, h.k8s.Update(context.Background(), obj))
+
+			h.r.Client = &replacingObjectOnDeleteClient{Client: h.k8s, kind: kind}
+			tunnel := h.get()
+			var rejectedSecret *corev1.Secret
+			if kind == "Secret" {
+				rejectedSecret = obj.(*corev1.Secret)
+			}
+			err = h.r.deleteConnector(context.Background(), &tunnel, rejectedSecret, true)
+			require.Error(t, err)
+			assert.True(t, apierrors.IsConflict(err), "stale delete should conflict, got: %v", err)
+
+			var replacement client.Object
+			if kind == "Deployment" {
+				replacement = &appsv1.Deployment{}
+			} else {
+				replacement = &corev1.Secret{}
+			}
+			require.NoError(t, h.k8s.Get(context.Background(), h.connectorKey(), replacement))
+			assert.Equal(t, types.UID("replacement-uid"), replacement.GetUID())
+			assert.Empty(t, replacement.GetOwnerReferences(), "replacement resource must remain foreign")
+		})
+	}
+}
+
+// restoringSecretOnNotFoundClient simulates a Secret being recreated after a
+// cached read reports NotFound.
+type restoringSecretOnNotFoundClient struct {
+	client.Client
+	restored *corev1.Secret
+	done     bool
+}
+
+func (c *restoringSecretOnNotFoundClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	err := c.Client.Get(ctx, key, obj, opts...)
+	if _, ok := obj.(*corev1.Secret); ok && apierrors.IsNotFound(err) && !c.done {
+		c.done = true
+		restored := c.restored.DeepCopy()
+		restored.ResourceVersion = ""
+		restored.UID = types.UID("restored-secret-uid")
+		if createErr := c.Client.Create(ctx, restored); createErr != nil {
+			return createErr
+		}
+	}
+	return err
+}
+
+func TestMissingConnectorSecretDoesNotDeleteSubsequentlyRestoredSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	secret, err := h.secret()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), secret))
+
+	h.r.Client = &restoringSecretOnNotFoundClient{Client: h.k8s, restored: secret}
+	err = h.r.validateConnectorSecret(context.Background(), func() *agentopsv1alpha1.AgentEdgeTunnel {
+		tunnel := h.get()
+		return &tunnel
+	}())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is missing")
+
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "owned Deployment must be removed")
+	restored, getErr := h.secret()
+	require.NoError(t, getErr, "a Secret restored after the missing read must not be deleted")
+	assert.Equal(t, types.UID("restored-secret-uid"), restored.UID)
+}
+
+func TestAccessBackoffStillValidatesAndCleansInvalidConnectorSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+
+	// Trigger a Cloudflare 429 and enter the verification backoff.
+	h.now = active.Status.AccessPolicyNextCheckAt.Time
+	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	got := h.get()
+	require.Contains(t, got.Status.Message, "rate-limited")
+	verifyCalls := h.cf.VerifyAccessCalls
+
+	// A lost owner reference makes the persisted Secret invalid while Access
+	// verification is deferred. Cleanup must stop the Deployment but preserve
+	// the now-foreign Secret, without calling Cloudflare again.
+	secret, err := h.secret()
+	require.NoError(t, err)
+	secret.OwnerReferences = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed")
+	got = h.get()
+	assert.Contains(t, got.Status.Message, "Access policy verification rate-limited by Cloudflare")
+	assert.Contains(t, got.Status.Message, "not managed", "validation failure must remain visible alongside the rate-limit state")
+	assert.Equal(t, verifyCalls, h.cf.VerifyAccessCalls, "backoff must still defer Access verification")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "invalid connector Deployment must be removed during backoff")
+	stored, secretErr := h.secret()
+	require.NoError(t, secretErr)
+	assert.Nil(t, stored.OwnerReferences, "foreign Secret must remain untouched")
+}
+
 // TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
 // application remains in place while the connector prevents tunnel deletion.
+
+// TestDeferredAccessSetupStillValidatesConnectorSecret verifies that an Active
+// legacy tunnel waiting for initial Access setup still validates credentials
+// before returning early, without restoring its Deployment.
+func TestDeferredAccessSetupStillValidatesConnectorSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+
+	active := h.get()
+	active.Status.AccessAppID = ""
+	nextCheck := metav1.NewTime(h.now.Add(time.Minute))
+	active.Status.AccessPolicyNextCheckAt = &nextCheck
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &active))
+
+	secret, err := h.secret()
+	require.NoError(t, err)
+	secret.OwnerReferences = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed")
+	assert.Zero(t, h.cf.VerifyAccessCalls, "deferred initial setup must not call Cloudflare")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "invalid connector Deployment must be removed")
+	stored, secretErr := h.secret()
+	require.NoError(t, secretErr)
+	assert.Nil(t, stored.OwnerReferences, "foreign Secret must remain untouched")
+}
+
 func TestConnectorRemovalFailureRetainsAccessApplication(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -1533,10 +1945,7 @@ func TestInitialAccessRateLimitDoesNotRestoreConnector(t *testing.T) {
 	deployment, err := h.deployment()
 	require.NoError(t, err)
 	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
-	secret, err := h.secret()
-	require.NoError(t, err)
-	require.NoError(t, h.k8s.Delete(context.Background(), secret))
-
+	// Keep the valid credentials Secret; only the Deployment is missing.
 	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
 	res, err := h.reconcile()
 	require.NoError(t, err)
@@ -1545,13 +1954,20 @@ func TestInitialAccessRateLimitDoesNotRestoreConnector(t *testing.T) {
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
 	assert.Empty(t, got.Status.AccessAppID)
 	assert.Contains(t, got.Status.Message, "rate-limited")
-	h.assertConnectorGone()
+	deployment, err = h.deployment()
+	assert.True(t, apierrors.IsNotFound(err), "connector Deployment must remain absent")
+	secret, err := h.secret()
+	require.NoError(t, err, "valid connector credentials must be preserved")
+	assert.True(t, metav1.IsControlledBy(secret, &got))
 
 	// Reconciliation during backoff must not bypass the deadline or restore
 	// the connector before the Access application has been established.
 	_, err = h.reconcile()
 	require.NoError(t, err)
-	h.assertConnectorGone()
+	deployment, err = h.deployment()
+	assert.True(t, apierrors.IsNotFound(err), "backoff must not restore the connector Deployment")
+	_, err = h.secret()
+	require.NoError(t, err, "valid connector credentials must remain available")
 }
 
 func TestActiveRequeueAfterPreservesLifecycleLimitsDuringAccessBackoff(t *testing.T) {

@@ -234,6 +234,12 @@ func (r *AgentEdgeTunnelReconciler) reconcileMode(ctx context.Context, t *agento
 		return ctrl.Result{}, true, errors.New(msg)
 	case !r.DryRun && fakeState:
 		log.FromContext(ctx).Info("Discarding status written by --dry-run", "name", t.Name)
+		// Remove only connector resources owned by this tunnel before clearing
+		// fake status. In particular, an immutable dry-run Secret cannot be
+		// overwritten with real credentials during the next provisioning pass.
+		if err := r.deleteConnector(ctx, t, nil, true); err != nil {
+			return ctrl.Result{}, true, fmt.Errorf("removing dry-run connector resources: %w", err)
+		}
 		t.Status = agentopsv1alpha1.AgentEdgeTunnelStatus{}
 		if err := r.Status().Update(ctx, t); err != nil {
 			return ctrl.Result{}, true, err
@@ -366,6 +372,19 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 		// prior 429 warning visible until a successful verification clears it.
 		accessRateLimited = strings.HasPrefix(t.Status.Message, "Access policy verification rate-limited")
 		if accessRateLimited || accessSetupRequired {
+			// Validate credentials and remove an invalid connector before deferring
+			// Access verification. This path must not create or restore a Deployment.
+			if err := r.validateConnectorSecret(ctx, t); err != nil {
+				t.Status.ConnectorReady = false
+				t.Status.Message = err.Error()
+				if accessRateLimited {
+					t.Status.Message = "Access policy verification rate-limited by Cloudflare; " + t.Status.Message
+				}
+				if uerr := r.Status().Update(ctx, t); uerr != nil {
+					return ctrl.Result{}, errors.Join(err, uerr)
+				}
+				return ctrl.Result{}, fmt.Errorf("validating connector credentials: %w", err)
+			}
 			// A missing application is not a verified policy, and a prior 429
 			// leaves the existing policy unverified. Do not create or restore a
 			// connector until Access verification succeeds.
@@ -388,6 +407,16 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 				t.Status.AccessPolicyNextCheckAt = &next
 			}
 			t.Status.Message = "Access policy verification rate-limited by Cloudflare; retaining the existing tunnel state and retrying after backoff"
+			// Credentials must remain valid even while Access verification is
+			// deferred. Validate without creating or restoring the Deployment.
+			if validationErr := r.validateConnectorSecret(ctx, t); validationErr != nil {
+				t.Status.ConnectorReady = false
+				t.Status.Message = "Access policy verification rate-limited by Cloudflare; " + validationErr.Error()
+				if uerr := r.Status().Update(ctx, t); uerr != nil {
+					return ctrl.Result{}, errors.Join(validationErr, uerr)
+				}
+				return ctrl.Result{}, fmt.Errorf("validating connector credentials: %w", validationErr)
+			}
 			if uerr := r.Status().Update(ctx, t); uerr != nil {
 				return ctrl.Result{}, fmt.Errorf("recording Access verification rate limit: %w", uerr)
 			}
@@ -492,14 +521,22 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	if t.Status.TunnelID == "" {
 		// A Secret we cannot use would fail every attempt after the tunnel was
 		// already created, so check before making any Cloudflare call.
-		if err := r.checkConnectorSecretFree(ctx, t); err != nil {
+		hasPersistedSecret, err := r.checkConnectorSecretFree(ctx, t)
+		if err != nil {
 			return r.fail(ctx, t, err)
 		}
 		// A tunnel from an earlier attempt that stopped before its ID was
-		// recorded would otherwise be orphaned and then duplicated.
+		// recorded would otherwise be orphaned and then duplicated. Its
+		// immutable connector Secret is the independent ownership evidence.
 		recovered, err := r.recoverTunnel(ctx, t)
 		if err != nil {
 			return r.fail(ctx, t, err)
+		}
+		if recovered == nil && hasPersistedSecret {
+			// Never create a second tunnel and try to overwrite credentials that
+			// Cloudflare returned only once. A later retry may see the original
+			// tunnel after Cloudflare's lookup becomes consistent.
+			return r.fail(ctx, t, fmt.Errorf("owned connector credentials Secret %q exists but no matching Cloudflare tunnel can be recovered; refusing to create another tunnel or replace immutable credentials", connectorName(t)))
 		}
 		if recovered != nil {
 			t.Status.TunnelID = recovered.ID
@@ -521,7 +558,10 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 			// Cloudflare returns the tunnel secret only once, so it is stored
 			// before anything else can fail.
 			if err := r.writeConnectorSecret(ctx, t, info, hostname); err != nil {
-				r.discardTunnel(ctx, info.ID)
+				// The Secret write may have committed even if its response failed.
+				// Keep the tunnel so a retry can recover it from the persisted,
+				// immutable credentials instead of deleting their backing tunnel.
+				logger.Error(err, "Connector Secret write failed after tunnel creation; keeping the tunnel because the write may have committed. If the Secret was not stored, resolve the orphaned tunnel manually", "tunnelID", info.ID, "tunnelName", tunnelName(t))
 				return r.fail(ctx, t, fmt.Errorf("storing connector credentials: %w", err))
 			}
 			t.Status.TunnelID = info.ID
@@ -592,18 +632,21 @@ func (r *AgentEdgeTunnelReconciler) fail(ctx context.Context, t *agentopsv1alpha
 // checkConnectorSecretFree fails fast when the connector Secret name is taken
 // by an object this tunnel does not own. writeConnectorSecret checks again,
 // which covers a Secret created in between.
-func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (bool, error) {
 	if !hasConnector(t) {
-		return nil
+		return false, nil
 	}
 	var s corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &s); err != nil {
-		return client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	if !metav1.IsControlledBy(&s, t) {
-		return fmt.Errorf("secret %q already exists and is not managed by this AgentEdgeTunnel; refusing to overwrite it", s.Name)
+		return false, fmt.Errorf("secret %q already exists and is not managed by this AgentEdgeTunnel; refusing to overwrite it", s.Name)
 	}
-	return nil
+	return true, nil
 }
 
 // namesAreOwned reports whether t has enough UID data to construct its
@@ -686,13 +729,6 @@ func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *age
 		return false, nil
 	}
 	return creds.AccountTag == r.AccountID && creds.TunnelID == tunnelID, nil
-}
-
-// discardTunnel removes a tunnel whose ID could not be recorded.
-func (r *AgentEdgeTunnelReconciler) discardTunnel(ctx context.Context, tunnelID string) {
-	if err := r.CloudflareClient.DeleteTunnel(ctx, tunnelID); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to remove an unrecorded tunnel; it may be orphaned", "tunnelID", tunnelID)
-	}
 }
 
 // ensureAccess creates the Access application and policy once. Its ID is
@@ -798,7 +834,7 @@ func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1al
 	if t.Status.TunnelID == "" {
 		return nil
 	}
-	if err := r.deleteConnector(ctx, t); err != nil {
+	if err := r.deleteConnector(ctx, t, nil, true); err != nil {
 		// Without this the tunnel cannot be deleted. DNS can still be removed,
 		// but the Access application is retained while the tunnel remains.
 		connectorErr := fmt.Errorf("removing connector: %w", err)
@@ -893,9 +929,85 @@ func (r *AgentEdgeTunnelReconciler) writeConnectorSecret(ctx context.Context, t 
 			credentialsKey: creds,
 			configKey:      []byte(connectorConfig(info.ID, hostname, svc, t.Namespace)),
 		}
+		// Connector credentials are long-lived and must not be mutable after
+		// provisioning. Existing valid Secrets are sealed on their next write.
+		secret.Immutable = boolPtr(true)
 		return controllerutil.SetControllerReference(t, secret, r.Scheme)
 	})
 	return err
+}
+
+// validateConnectorSecretContents verifies that the Secret consumed by cloudflared is
+// still controlled by this tunnel and contains exactly the credentials and
+// ingress configuration expected from its recorded status and spec.
+func (r *AgentEdgeTunnelReconciler) validateConnectorSecretContents(secret *corev1.Secret, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	if !metav1.IsControlledBy(secret, t) {
+		return fmt.Errorf("connector credentials Secret %q is not managed by this AgentEdgeTunnel; refusing to use it", secret.Name)
+	}
+	var creds struct {
+		AccountTag   string
+		TunnelSecret string
+		TunnelID     string
+	}
+	if err := json.Unmarshal(secret.Data[credentialsKey], &creds); err != nil {
+		return fmt.Errorf("connector credentials Secret %q contains invalid credentials JSON", secret.Name)
+	}
+	secretBytes, err := base64.StdEncoding.DecodeString(creds.TunnelSecret)
+	if err != nil || len(secretBytes) != 32 {
+		return fmt.Errorf("connector credentials Secret %q contains an invalid tunnel secret", secret.Name)
+	}
+	if creds.AccountTag != r.AccountID || creds.TunnelID != t.Status.TunnelID {
+		return fmt.Errorf("connector credentials Secret %q does not match the recorded Cloudflare account and tunnel", secret.Name)
+	}
+	svc, err := target(t)
+	if err != nil {
+		return err
+	}
+	wantConfig := connectorConfig(t.Status.TunnelID, t.Status.Hostname, svc, t.Namespace)
+	if string(secret.Data[configKey]) != wantConfig {
+		return fmt.Errorf("connector credentials Secret %q contains configuration that does not match the AgentEdgeTunnel spec", secret.Name)
+	}
+	return nil
+}
+
+// validateConnectorSecret reads and verifies persisted credentials without
+// creating or restoring a Deployment.
+func (r *AgentEdgeTunnelReconciler) validateConnectorSecret(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+	if !hasConnector(t) {
+		return nil
+	}
+
+	// Cloudflare only returns the tunnel credentials at creation, so a missing
+	// Secret cannot be regenerated. Delete only the Deployment: a Secret restored
+	// after this read is not the missing object and must be left untouched.
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &secret); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			missingErr := fmt.Errorf("connector credentials Secret %q is missing; Cloudflare returns them only once, so delete and recreate this AgentEdgeTunnel", connectorName(t))
+			if cleanupErr := r.deleteConnector(ctx, t, nil, false); cleanupErr != nil {
+				return errors.Join(missingErr, fmt.Errorf("removing connector with missing credentials: %w", cleanupErr))
+			}
+			return missingErr
+		}
+		return err
+	}
+	if err := r.validateConnectorSecretContents(&secret, t); err != nil {
+		// Delete exactly the rejected object, guarded by the UID and resource
+		// version observed during validation. Never refetch a replacement.
+		if cleanupErr := r.deleteConnector(ctx, t, &secret, true); cleanupErr != nil {
+			return errors.Join(err, fmt.Errorf("removing connector with invalid credentials: %w", cleanupErr))
+		}
+		return err
+	}
+	// Seal valid Secrets created by older operator versions. The update uses
+	// resourceVersion, so a concurrent replacement or modification conflicts.
+	if secret.Immutable == nil || !*secret.Immutable {
+		secret.Immutable = boolPtr(true)
+		if err := r.Update(ctx, &secret); err != nil {
+			return fmt.Errorf("making connector credentials Secret immutable: %w", err)
+		}
+	}
+	return nil
 }
 
 // ensureConnector keeps the cloudflared Deployment in its desired state and
@@ -904,14 +1016,7 @@ func (r *AgentEdgeTunnelReconciler) ensureConnector(ctx context.Context, t *agen
 	if !hasConnector(t) {
 		return false, nil
 	}
-
-	// Cloudflare only returns the tunnel credentials at creation, so a missing
-	// Secret cannot be regenerated.
-	var secret corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &secret); err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			return false, fmt.Errorf("connector credentials Secret %q is missing; Cloudflare returns them only once, so delete and recreate this AgentEdgeTunnel", connectorName(t))
-		}
+	if err := r.validateConnectorSecret(ctx, t); err != nil {
 		return false, err
 	}
 
@@ -1005,29 +1110,40 @@ func (r *AgentEdgeTunnelReconciler) mutateConnector(dep *appsv1.Deployment, t *a
 
 // deleteConnector removes the connector Deployment and Secret, but only if
 // this tunnel owns them.
-func (r *AgentEdgeTunnelReconciler) deleteConnector(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+func (r *AgentEdgeTunnelReconciler) deleteConnector(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel, rejectedSecret *corev1.Secret, deleteCurrentSecret bool) error {
 	if !hasConnector(t) {
 		return nil
 	}
 	meta := metav1.ObjectMeta{Name: connectorName(t), Namespace: t.Namespace}
-	for _, obj := range []client.Object{
-		&appsv1.Deployment{ObjectMeta: meta},
-		&corev1.Secret{ObjectMeta: meta},
-	} {
-		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				continue
-			}
+	dep := &appsv1.Deployment{ObjectMeta: meta}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(dep), dep); err != nil {
+		if client.IgnoreNotFound(err) != nil {
 			return err
 		}
-		if !metav1.IsControlledBy(obj, t) {
-			continue
-		}
-		if err := client.IgnoreNotFound(r.Delete(ctx, obj)); err != nil {
+	} else if metav1.IsControlledBy(dep, t) {
+		uid, resourceVersion := dep.GetUID(), dep.GetResourceVersion()
+		preconditions := client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}
+		if err := client.IgnoreNotFound(r.Delete(ctx, dep, preconditions)); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	secret := rejectedSecret
+	if secret == nil && deleteCurrentSecret {
+		secret = &corev1.Secret{ObjectMeta: meta}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(secret), secret); err != nil {
+			if client.IgnoreNotFound(err) == nil {
+				return nil
+			}
+			return err
+		}
+	}
+	if secret == nil || !metav1.IsControlledBy(secret, t) {
+		return nil
+	}
+	uid, resourceVersion := secret.GetUID(), secret.GetResourceVersion()
+	preconditions := client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}
+	return client.IgnoreNotFound(r.Delete(ctx, secret, preconditions))
 }
 
 // statusMessage explains why an Active tunnel is not yet fully usable.
