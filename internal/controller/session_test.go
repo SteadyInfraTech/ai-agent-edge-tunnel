@@ -315,6 +315,45 @@ func TestActiveSessionTunnelStillVerifiesAccessWhenSessionCRDIsUnavailable(t *te
 	})
 }
 
+// TestActiveSessionTunnelKeepsSafeguardsRunningWhenSessionReadFails ensures
+// transient AgentSession API errors do not suspend the hard TTL or other active
+// tunnel safeguards.
+func TestActiveSessionTunnelKeepsSafeguardsRunningWhenSessionReadFails(t *testing.T) {
+	h := newHarness(t, withSession, newSession("Bound", "http://support-agent.default.svc:8080"))
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	require.Equal(t, agentopsv1alpha1.PhaseActive, active.Status.Phase)
+	require.NotNil(t, active.Status.ExpiresAt)
+
+	h.r.Client = &unavailableAgentSessionClient{
+		Client: h.k8s,
+		err:    errors.New("temporary Kubernetes API failure"),
+	}
+	h.now = active.Status.ExpiresAt.Time.Add(time.Second)
+
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.Zero(t, res.RequeueAfter, "a tunnel terminated by TTL should not be requeued")
+	assert.Equal(t, agentopsv1alpha1.PhaseTerminated, h.get().Status.Phase)
+	assert.Contains(t, h.get().Status.Message, "TTL")
+	assert.Empty(t, h.cf.Tunnels)
+	assert.Empty(t, h.cf.DNSRecords)
+	h.assertConnectorGone()
+}
+
+type unavailableAgentSessionClient struct {
+	client.Client
+	err error
+}
+
+func (c *unavailableAgentSessionClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if session, ok := obj.(*unstructured.Unstructured); ok && session.GroupVersionKind() == agentSessionGVK {
+		return c.err
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 // TestActiveSessionTunnelRequeuesAtThePollInterval checks: the first requeue
 // after provisioning already uses the session poll interval.
 func TestActiveSessionTunnelRequeuesAtThePollInterval(t *testing.T) {
