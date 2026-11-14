@@ -223,7 +223,7 @@ quota write permissions to tenant roles even with these policies installed.
 | `CLOUDFLARE_ZONE_ID`, `CLOUDFLARE_ZONE_NAME` | Required. Pins this operator instance to one Cloudflare zone; the base domain must be the zone apex or one of its subdomains, and each object's `spec.cloudflare.zoneID` must match. |
 | `EDGE_PUBLIC_NAMESPACES` | Optional comma-separated namespace allowlist for `security.allowPublic: true`. Empty or unset denies public tunnels in every namespace. |
 | `EDGE_QUOTA_ADMIN_GROUPS` | Optional comma-separated Kubernetes groups authorized to manage `NamespaceTunnelQuota` objects. `system:masters` is authorized while the policy ConfigMap is available. |
-| `--base-domain` / `EDGE_BASE_DOMAIN` | Required. Hostnames are `<subdomain>.<base-domain>`. |
+| `--base-domain` / `EDGE_BASE_DOMAIN` | Required. Hostnames are `<subdomain>.<base-domain>`. After changing it and restarting the manager, existing tunnels whose recorded hostname no longer matches are terminated and cleaned up; tunnels are not silently migrated. |
 | `--connector-image` / `CONNECTOR_IMAGE` | Required. The cloudflared image; pin a version or digest. |
 | `--leader-elect` | Enable when running more than one replica. |
 | `--health-probe-bind-address` | `/healthz` and `/readyz` (default `:8081`). |
