@@ -1951,13 +1951,20 @@ func TestInitialAccessRateLimitDoesNotRestoreConnector(t *testing.T) {
 	assert.Equal(t, agentopsv1alpha1.PhaseActive, got.Status.Phase)
 	assert.Empty(t, got.Status.AccessAppID)
 	assert.Contains(t, got.Status.Message, "rate-limited")
-	h.assertConnectorGone()
+	deployment, err = h.deployment()
+	assert.True(t, apierrors.IsNotFound(err), "connector Deployment must remain absent")
+	secret, err := h.secret()
+	require.NoError(t, err, "valid connector credentials must be preserved")
+	assert.True(t, metav1.IsControlledBy(secret, &got))
 
 	// Reconciliation during backoff must not bypass the deadline or restore
 	// the connector before the Access application has been established.
 	_, err = h.reconcile()
 	require.NoError(t, err)
-	h.assertConnectorGone()
+	deployment, err = h.deployment()
+	assert.True(t, apierrors.IsNotFound(err), "backoff must not restore the connector Deployment")
+	_, err = h.secret()
+	require.NoError(t, err, "valid connector credentials must remain available")
 }
 
 func TestActiveRequeueAfterPreservesLifecycleLimitsDuringAccessBackoff(t *testing.T) {
