@@ -1942,10 +1942,7 @@ func TestInitialAccessRateLimitDoesNotRestoreConnector(t *testing.T) {
 	deployment, err := h.deployment()
 	require.NoError(t, err)
 	require.NoError(t, h.k8s.Delete(context.Background(), deployment))
-	secret, err := h.secret()
-	require.NoError(t, err)
-	require.NoError(t, h.k8s.Delete(context.Background(), secret))
-
+	// Keep the valid credentials Secret; only the Deployment is missing.
 	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
 	res, err := h.reconcile()
 	require.NoError(t, err)
