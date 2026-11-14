@@ -341,6 +341,80 @@ func TestForeignSecretFailsBeforeCreatingATunnel(t *testing.T) {
 	assert.Empty(t, sec.Data, "the foreign Secret must be untouched")
 }
 
+// flakySecretCreateClient simulates an API timeout either before or after
+// the API server persists a newly-created connector Secret.
+type flakySecretCreateClient struct {
+	client.Client
+	stored bool
+	failed bool
+}
+
+func (c *flakySecretCreateClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*corev1.Secret); ok && !c.failed {
+		c.failed = true
+		if c.stored {
+			if err := c.Client.Create(ctx, obj, opts...); err != nil {
+				return err
+			}
+		}
+		return errors.New("etcdserver: request timed out")
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+// TestAmbiguousConnectorSecretWriteRecoversPersistedCredentials verifies
+// that a committed Secret and its Cloudflare tunnel survive an ambiguous
+// create response and are reused on the next reconcile.
+func TestAmbiguousConnectorSecretWriteRecoversPersistedCredentials(t *testing.T) {
+	h := newHarness(t, nil)
+	h.r.Client = &flakySecretCreateClient{Client: h.k8s, stored: true}
+
+	_, err := h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "storing connector credentials")
+	assert.Len(t, h.cf.Tunnels, 1, "the tunnel backing the possibly-persisted credentials must be kept")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls)
+	assert.Empty(t, h.get().Status.TunnelID)
+
+	secretBefore, err := h.secret()
+	require.NoError(t, err)
+	require.NotNil(t, secretBefore.Immutable)
+	require.True(t, *secretBefore.Immutable)
+	dataBefore := map[string][]byte{}
+	for key, value := range secretBefore.Data {
+		dataBefore[key] = append([]byte(nil), value...)
+	}
+
+	h.r.Client = h.k8s
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	assert.Equal(t, agentopsv1alpha1.PhaseActive, h.get().Status.Phase)
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "the retry must recover rather than create another tunnel")
+	secretAfter, err := h.secret()
+	require.NoError(t, err)
+	assert.Equal(t, dataBefore, secretAfter.Data, "recovery must not rewrite immutable Secret data")
+	assert.True(t, *secretAfter.Immutable)
+}
+
+// TestAmbiguousConnectorSecretWriteWithoutCommitDoesNotDuplicateTunnel ensures
+// a tunnel is not duplicated when the Secret write definitely did not commit.
+func TestAmbiguousConnectorSecretWriteWithoutCommitDoesNotDuplicateTunnel(t *testing.T) {
+	h := newHarness(t, nil)
+	h.r.Client = &flakySecretCreateClient{Client: h.k8s, stored: false}
+
+	_, err := h.reconcile()
+	require.Error(t, err)
+	assert.Len(t, h.cf.Tunnels, 1, "the tunnel is retained because the write outcome may be ambiguous")
+	assert.Empty(t, h.get().Status.TunnelID)
+
+	h.r.Client = h.k8s
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ownership cannot be established")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "the unrecoverable orphan must not trigger another create")
+	assert.Len(t, h.cf.Tunnels, 1, "the unproven tunnel must remain untouched")
+}
+
 // TestMissingConnectorSecretIsReportedNotSilentlyIgnored checks: missing connector secret is reported not silently ignored.
 func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	h := newHarness(t, nil)

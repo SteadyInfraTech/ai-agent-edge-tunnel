@@ -535,7 +535,10 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 			// Cloudflare returns the tunnel secret only once, so it is stored
 			// before anything else can fail.
 			if err := r.writeConnectorSecret(ctx, t, info, hostname); err != nil {
-				r.discardTunnel(ctx, info.ID)
+				// The Secret write may have committed even if its response failed.
+				// Keep the tunnel so a retry can recover it from the persisted,
+				// immutable credentials instead of deleting their backing tunnel.
+				logger.Error(err, "Connector Secret write failed after tunnel creation; keeping the tunnel because the write may have committed. If the Secret was not stored, resolve the orphaned tunnel manually", "tunnelID", info.ID, "tunnelName", tunnelName(t))
 				return r.fail(ctx, t, fmt.Errorf("storing connector credentials: %w", err))
 			}
 			t.Status.TunnelID = info.ID
@@ -703,13 +706,6 @@ func (r *AgentEdgeTunnelReconciler) credentialsMatch(ctx context.Context, t *age
 		return false, nil
 	}
 	return creds.AccountTag == r.AccountID && creds.TunnelID == tunnelID, nil
-}
-
-// discardTunnel removes a tunnel whose ID could not be recorded.
-func (r *AgentEdgeTunnelReconciler) discardTunnel(ctx context.Context, tunnelID string) {
-	if err := r.CloudflareClient.DeleteTunnel(ctx, tunnelID); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to remove an unrecorded tunnel; it may be orphaned", "tunnelID", tunnelID)
-	}
 }
 
 // ensureAccess creates the Access application and policy once. Its ID is
