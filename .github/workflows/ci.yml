@@ -72,12 +72,47 @@ jobs:
       - name: Render Kubernetes manifests
         run: |
           kubectl kustomize config/default > /tmp/default.yaml
+          kubectl kustomize config/overlays/namespaced > /tmp/namespaced.yaml
           grep -q '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml
           test "$(grep -c '^kind: ValidatingAdmissionPolicy$' /tmp/default.yaml)" -eq 4
           test "$(grep -c '^kind: ValidatingAdmissionPolicyBinding$' /tmp/default.yaml)" -eq 4
           grep -q '^  name: edge-tunnel-quota-admin-policy$' /tmp/default.yaml
           grep -q '^  name: edge-tunnel-quota-status-policy$' /tmp/default.yaml
           grep -q '^  name: edge-tunnel-finalizer-policy$' /tmp/default.yaml
+          for manifest in /tmp/default.yaml /tmp/namespaced.yaml; do
+            ruby - "$manifest" <<'RUBY'
+          require 'yaml'
+
+          path = ARGV.fetch(0)
+          documents = YAML.load_stream(File.read(path))
+          deployment = documents.compact.find do |resource|
+            resource['kind'] == 'Deployment' &&
+              resource.dig('metadata', 'name') == 'edge-tunnel-controller-manager'
+          end
+          abort "#{path}: manager Deployment not found" unless deployment
+
+          containers = deployment.dig('spec', 'template', 'spec', 'containers') || []
+          managers = containers.select { |container| container['name'] == 'manager' }
+          abort "#{path}: expected exactly one manager container" unless managers.length == 1
+          manager = managers.first
+
+          args = manager['args'] || []
+          values = []
+          args.each_with_index do |arg, index|
+            if arg == '--metrics-bind-address'
+              values << args[index + 1]
+            elsif arg.start_with?('--metrics-bind-address=')
+              values << arg.split('=', 2).last
+            end
+          end
+          effective_value = values.last
+          abort "#{path}: effective manager --metrics-bind-address must be exactly 0 (got #{effective_value.inspect})" unless effective_value == '0'
+
+          metrics_port = (manager['ports'] || []).any? { |port| port['name'] == 'metrics' }
+          abort "#{path}: manager container must not declare a metrics port" if metrics_port
+          puts "#{path}: manager metrics listener disabled and metrics port absent"
+          RUBY
+          done
 
       - name: Namespaced overlay grants nothing cluster-wide
         run: |

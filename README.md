@@ -120,7 +120,7 @@ unstructured, so this operator does not depend on agentops-operator and starts w
 - **No adoption.** The operator refuses to overwrite a Secret, Deployment or DNS record it does not own.
 - **Immutable once created:** `spec.service`, `spec.security` and `spec.cloudflare` cannot change after the
   tunnel exists; delete and recreate instead.
-- Metrics (`--metrics-bind-address`) are plain HTTP without authentication; restrict them with a NetworkPolicy.
+- Metrics are disabled in the shipped deployment (`--metrics-bind-address=0`). If enabled by changing the manager arguments to a non-zero bind address, controller-runtime serves them over plain HTTP without authentication by default. Do not enable that listener on a cluster-reachable interface unless a NetworkPolicy or equivalent network control restricts access to trusted Prometheus clients. The project does not ship a metrics Service or NetworkPolicy; health and readiness remain on port `8081`.
 
 ## Status
 
@@ -227,7 +227,7 @@ quota write permissions to tenant roles even with these policies installed.
 | `--connector-image` / `CONNECTOR_IMAGE` | Required. The cloudflared image; pin a version or digest. |
 | `--leader-elect` | Enable when running more than one replica. |
 | `--health-probe-bind-address` | `/healthz` and `/readyz` (default `:8081`). |
-| `--metrics-bind-address` | Prometheus metrics; `0` (default) disables them. |
+| `--metrics-bind-address` | Prometheus metrics; disabled in the shipped deployment (`0`). To enable, set a non-zero bind address and restrict network access to trusted scrapers; the default HTTP endpoint has no authentication. |
 | `--dry-run` | Use an in-memory fake instead of the Cloudflare API. Nothing is provisioned in Cloudflare; the connector Deployment is still created in the cluster. Local development only. Fake IDs start with `dryrun-`: a real-mode operator discards status that dry-run wrote, and a dry-run operator refuses (and will not delete) objects that hold real IDs, so the two never act on each other's state. |
 | `--zap-devel`, `--zap-log-level` | Logging (JSON by default). |
 
