@@ -1539,7 +1539,7 @@ func TestDeleteConnectorUsesPreconditions(t *testing.T) {
 				obj, err = h.secret()
 			}
 			require.NoError(t, err)
-			obj.SetUID(types.UID("owned-"+strings.ToLower(kind)))
+			obj.SetUID(types.UID("owned-" + strings.ToLower(kind)))
 			require.NoError(t, h.k8s.Update(context.Background(), obj))
 
 			h.r.Client = &replacingObjectOnDeleteClient{Client: h.k8s, kind: kind}
