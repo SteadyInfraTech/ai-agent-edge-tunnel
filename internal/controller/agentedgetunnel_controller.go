@@ -924,7 +924,7 @@ func (r *AgentEdgeTunnelReconciler) writeConnectorSecret(ctx context.Context, t 
 	return err
 }
 
-// validateConnectorSecret verifies that the Secret consumed by cloudflared is
+// validateConnectorSecretContents verifies that the Secret consumed by cloudflared is
 // still controlled by this tunnel and contains exactly the credentials and
 // ingress configuration expected from its recorded status and spec.
 func (r *AgentEdgeTunnelReconciler) validateConnectorSecretContents(secret *corev1.Secret, t *agentopsv1alpha1.AgentEdgeTunnel) error {
@@ -957,8 +957,8 @@ func (r *AgentEdgeTunnelReconciler) validateConnectorSecretContents(secret *core
 	return nil
 }
 
-// ensureConnector keeps the cloudflared Deployment in its desired state and
-// reports whether it is connected. With no spec.service there is nothing to run.
+// validateConnectorSecret reads and verifies persisted credentials without
+// creating or restoring a Deployment.
 func (r *AgentEdgeTunnelReconciler) validateConnectorSecret(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
 	if !hasConnector(t) {
 		return nil
