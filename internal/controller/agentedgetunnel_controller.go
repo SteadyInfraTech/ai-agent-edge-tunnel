@@ -498,14 +498,22 @@ func (r *AgentEdgeTunnelReconciler) provision(ctx context.Context, t *agentopsv1
 	if t.Status.TunnelID == "" {
 		// A Secret we cannot use would fail every attempt after the tunnel was
 		// already created, so check before making any Cloudflare call.
-		if err := r.checkConnectorSecretFree(ctx, t); err != nil {
+		hasPersistedSecret, err := r.checkConnectorSecretFree(ctx, t)
+		if err != nil {
 			return r.fail(ctx, t, err)
 		}
 		// A tunnel from an earlier attempt that stopped before its ID was
-		// recorded would otherwise be orphaned and then duplicated.
+		// recorded would otherwise be orphaned and then duplicated. Its
+		// immutable connector Secret is the independent ownership evidence.
 		recovered, err := r.recoverTunnel(ctx, t)
 		if err != nil {
 			return r.fail(ctx, t, err)
+		}
+		if recovered == nil && hasPersistedSecret {
+			// Never create a second tunnel and try to overwrite credentials that
+			// Cloudflare returned only once. A later retry may see the original
+			// tunnel after Cloudflare's lookup becomes consistent.
+			return r.fail(ctx, t, fmt.Errorf("owned connector credentials Secret %q exists but no matching Cloudflare tunnel can be recovered; refusing to create another tunnel or replace immutable credentials", connectorName(t)))
 		}
 		if recovered != nil {
 			t.Status.TunnelID = recovered.ID
@@ -598,18 +606,21 @@ func (r *AgentEdgeTunnelReconciler) fail(ctx context.Context, t *agentopsv1alpha
 // checkConnectorSecretFree fails fast when the connector Secret name is taken
 // by an object this tunnel does not own. writeConnectorSecret checks again,
 // which covers a Secret created in between.
-func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) error {
+func (r *AgentEdgeTunnelReconciler) checkConnectorSecretFree(ctx context.Context, t *agentopsv1alpha1.AgentEdgeTunnel) (bool, error) {
 	if !hasConnector(t) {
-		return nil
+		return false, nil
 	}
 	var s corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &s); err != nil {
-		return client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	if !metav1.IsControlledBy(&s, t) {
-		return fmt.Errorf("secret %q already exists and is not managed by this AgentEdgeTunnel; refusing to overwrite it", s.Name)
+		return false, fmt.Errorf("secret %q already exists and is not managed by this AgentEdgeTunnel; refusing to overwrite it", s.Name)
 	}
-	return nil
+	return true, nil
 }
 
 // namesAreOwned reports whether t has enough UID data to construct its
@@ -952,7 +963,11 @@ func (r *AgentEdgeTunnelReconciler) ensureConnector(ctx context.Context, t *agen
 	var secret corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Namespace: t.Namespace, Name: connectorName(t)}, &secret); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			return false, fmt.Errorf("connector credentials Secret %q is missing; Cloudflare returns them only once, so delete and recreate this AgentEdgeTunnel", connectorName(t))
+			missingErr := fmt.Errorf("connector credentials Secret %q is missing; Cloudflare returns them only once, so delete and recreate this AgentEdgeTunnel", connectorName(t))
+			if cleanupErr := r.deleteConnector(ctx, t); cleanupErr != nil {
+				return false, errors.Join(missingErr, fmt.Errorf("removing connector with missing credentials: %w", cleanupErr))
+			}
+			return false, missingErr
 		}
 		return false, err
 	}
@@ -1082,7 +1097,10 @@ func (r *AgentEdgeTunnelReconciler) deleteConnector(ctx context.Context, t *agen
 		if !metav1.IsControlledBy(obj, t) {
 			continue
 		}
-		if err := client.IgnoreNotFound(r.Delete(ctx, obj)); err != nil {
+		uid := obj.GetUID()
+		resourceVersion := obj.GetResourceVersion()
+		preconditions := client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}
+		if err := client.IgnoreNotFound(r.Delete(ctx, obj, preconditions)); err != nil {
 			return err
 		}
 	}

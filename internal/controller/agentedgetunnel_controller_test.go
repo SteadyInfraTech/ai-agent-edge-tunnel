@@ -355,6 +355,8 @@ func TestMissingConnectorSecretIsReportedNotSilentlyIgnored(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "delete and recreate")
 	assert.Contains(t, h.get().Status.Message, "delete and recreate")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "owned Deployment must be removed when credentials are missing")
 }
 
 // TestExistingConnectorSecretIsSealed verifies that valid credentials
@@ -1078,6 +1080,33 @@ func orphanTunnel(t *testing.T, mutate func(*agentopsv1alpha1.AgentEdgeTunnel)) 
 	return h
 }
 
+// TestPersistedImmutableSecretPreventsDuplicateTunnelWhenLookupMisses ensures
+// a transiently invisible tunnel does not cause another tunnel to be created
+// or the immutable credentials to be overwritten.
+func TestPersistedImmutableSecretPreventsDuplicateTunnelWhenLookupMisses(t *testing.T) {
+	h := orphanTunnel(t, nil)
+	secretBefore, err := h.secret()
+	require.NoError(t, err)
+	require.NotNil(t, secretBefore.Immutable)
+	require.True(t, *secretBefore.Immutable)
+	dataBefore := map[string][]byte{}
+	for key, value := range secretBefore.Data {
+		dataBefore[key] = append([]byte(nil), value...)
+	}
+	for id := range h.cf.Tunnels {
+		delete(h.cf.Tunnels, id) // simulate a temporarily incomplete Cloudflare lookup
+	}
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no matching Cloudflare tunnel can be recovered")
+	assert.Equal(t, 1, h.cf.CreateTunnelCalls, "an existing immutable Secret must prevent creating a second tunnel")
+	secretAfter, getErr := h.secret()
+	require.NoError(t, getErr)
+	assert.Equal(t, dataBefore, secretAfter.Data, "persisted credentials must remain unchanged")
+	assert.True(t, *secretAfter.Immutable)
+}
+
 // TestDeletingAnOrphanTunnelRecoversAndCleansItUp covers deletion after
 // Cloudflare created a tunnel and the status write that records its ID was lost.
 func TestDeletingAnOrphanTunnelRecoversAndCleansItUp(t *testing.T) {
@@ -1384,6 +1413,78 @@ func (c *failingDeploymentDeleteClient) Delete(ctx context.Context, obj client.O
 		return c.err
 	}
 	return c.Client.Delete(ctx, obj, opts...)
+}
+
+// replacingObjectOnDeleteClient simulates deletion/recreation after the
+// controller's ownership read but before its Delete request.
+type replacingObjectOnDeleteClient struct {
+	client.Client
+	kind string
+}
+
+func (c *replacingObjectOnDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	matches := false
+	switch c.kind {
+	case "Deployment":
+		_, matches = obj.(*appsv1.Deployment)
+	case "Secret":
+		_, matches = obj.(*corev1.Secret)
+	}
+	if !matches {
+		return c.Client.Delete(ctx, obj, opts...)
+	}
+	current := obj.DeepCopyObject().(client.Object)
+	if err := c.Client.Delete(ctx, current); err != nil {
+		return err
+	}
+	replacement := obj.DeepCopyObject().(client.Object)
+	replacement.SetUID(types.UID("replacement-uid"))
+	replacement.SetResourceVersion("")
+	replacement.SetOwnerReferences(nil)
+	if err := c.Client.Create(ctx, replacement); err != nil {
+		return err
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+// TestDeleteConnectorUsesPreconditions ensures a resource replaced after the
+// ownership check is not deleted using the stale object.
+func TestDeleteConnectorUsesPreconditions(t *testing.T) {
+	for _, kind := range []string{"Deployment", "Secret"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newHarness(t, nil)
+			_, err := h.reconcile()
+			require.NoError(t, err)
+			var obj client.Object
+			if kind == "Deployment" {
+				obj, err = h.deployment()
+			} else {
+				dep, getErr := h.deployment()
+				require.NoError(t, getErr)
+				require.NoError(t, h.k8s.Delete(context.Background(), dep))
+				obj, err = h.secret()
+			}
+			require.NoError(t, err)
+			obj.SetUID(types.UID("owned-"+strings.ToLower(kind)))
+			require.NoError(t, h.k8s.Update(context.Background(), obj))
+
+			h.r.Client = &replacingObjectOnDeleteClient{Client: h.k8s, kind: kind}
+			tunnel := h.get()
+			err = h.r.deleteConnector(context.Background(), &tunnel)
+			require.Error(t, err)
+			assert.True(t, apierrors.IsConflict(err), "stale delete should conflict, got: %v", err)
+
+			var replacement client.Object
+			if kind == "Deployment" {
+				replacement = &appsv1.Deployment{}
+			} else {
+				replacement = &corev1.Secret{}
+			}
+			require.NoError(t, h.k8s.Get(context.Background(), h.connectorKey(), replacement))
+			assert.Equal(t, types.UID("replacement-uid"), replacement.GetUID())
+			assert.Empty(t, replacement.GetOwnerReferences(), "replacement resource must remain foreign")
+		})
+	}
 }
 
 // TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
