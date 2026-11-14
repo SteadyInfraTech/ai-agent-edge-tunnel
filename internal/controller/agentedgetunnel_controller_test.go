@@ -1580,7 +1580,10 @@ func (c *restoringSecretOnNotFoundClient) Get(ctx context.Context, key client.Ob
 	err := c.Client.Get(ctx, key, obj, opts...)
 	if _, ok := obj.(*corev1.Secret); ok && apierrors.IsNotFound(err) && !c.done {
 		c.done = true
-		if createErr := c.Client.Create(ctx, c.restored.DeepCopy()); createErr != nil {
+		restored := c.restored.DeepCopy()
+		restored.ResourceVersion = ""
+		restored.UID = types.UID("restored-secret-uid")
+		if createErr := c.Client.Create(ctx, restored); createErr != nil {
 			return createErr
 		}
 	}
@@ -1607,7 +1610,7 @@ func TestMissingConnectorSecretDoesNotDeleteSubsequentlyRestoredSecret(t *testin
 	assert.True(t, apierrors.IsNotFound(deploymentErr), "owned Deployment must be removed")
 	restored, getErr := h.secret()
 	require.NoError(t, getErr, "a Secret restored after the missing read must not be deleted")
-	assert.Equal(t, secret.UID, restored.UID)
+	assert.Equal(t, types.UID("restored-secret-uid"), restored.UID)
 }
 
 func TestAccessBackoffStillValidatesAndCleansInvalidConnectorSecret(t *testing.T) {
