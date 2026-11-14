@@ -234,6 +234,12 @@ func (r *AgentEdgeTunnelReconciler) reconcileMode(ctx context.Context, t *agento
 		return ctrl.Result{}, true, errors.New(msg)
 	case !r.DryRun && fakeState:
 		log.FromContext(ctx).Info("Discarding status written by --dry-run", "name", t.Name)
+		// Remove only connector resources owned by this tunnel before clearing
+		// fake status. In particular, an immutable dry-run Secret cannot be
+		// overwritten with real credentials during the next provisioning pass.
+		if err := r.deleteConnector(ctx, t); err != nil {
+			return ctrl.Result{}, true, fmt.Errorf("removing dry-run connector resources: %w", err)
+		}
 		t.Status = agentopsv1alpha1.AgentEdgeTunnelStatus{}
 		if err := r.Status().Update(ctx, t); err != nil {
 			return ctrl.Result{}, true, err

@@ -627,6 +627,37 @@ func TestRealModeDiscardsStatusWrittenByDryRun(t *testing.T) {
 	assert.Empty(t, got.Status.TunnelID, "fake IDs must not stay authoritative")
 	assert.Empty(t, got.Status.Phase, "the object must be provisioned again, not left Active")
 	assert.Contains(t, h.cf.Tunnels, fakeID, "a real operator must not pretend to delete a fake tunnel")
+	h.assertConnectorGone()
+}
+
+// TestRealModePreservesForeignConnectorSecret verifies mode switching removes
+// the owned Deployment but never deletes a Secret whose ownership was changed.
+func TestRealModePreservesForeignConnectorSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+
+	secret, err := h.secret()
+	require.NoError(t, err)
+	originalData := map[string][]byte{}
+	for key, value := range secret.Data {
+		originalData[key] = append([]byte(nil), value...)
+	}
+	secret.OwnerReferences = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	h.r.DryRun = false
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.True(t, res.Requeue)
+	assert.Empty(t, h.get().Status.TunnelID)
+
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "owned connector Deployment should be removed")
+	preserved, secretErr := h.secret()
+	require.NoError(t, secretErr)
+	assert.Empty(t, preserved.OwnerReferences, "foreign Secret ownership must remain untouched")
+	assert.Equal(t, originalData, preserved.Data, "foreign Secret data must remain untouched")
 }
 
 // TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp checks: real mode deletes dry run object without pretending to clean up.
