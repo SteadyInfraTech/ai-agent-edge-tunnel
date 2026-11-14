@@ -377,6 +377,9 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 			if err := r.validateConnectorSecret(ctx, t); err != nil {
 				t.Status.ConnectorReady = false
 				t.Status.Message = err.Error()
+				if accessRateLimited {
+					t.Status.Message = "Access policy verification rate-limited by Cloudflare; " + t.Status.Message
+				}
 				if uerr := r.Status().Update(ctx, t); uerr != nil {
 					return ctrl.Result{}, errors.Join(err, uerr)
 				}
@@ -408,7 +411,7 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 			// deferred. Validate without creating or restoring the Deployment.
 			if validationErr := r.validateConnectorSecret(ctx, t); validationErr != nil {
 				t.Status.ConnectorReady = false
-				t.Status.Message = validationErr.Error()
+				t.Status.Message = "Access policy verification rate-limited by Cloudflare; " + validationErr.Error()
 				if uerr := r.Status().Update(ctx, t); uerr != nil {
 					return ctrl.Result{}, errors.Join(validationErr, uerr)
 				}
