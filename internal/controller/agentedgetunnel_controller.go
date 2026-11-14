@@ -821,7 +821,7 @@ func (r *AgentEdgeTunnelReconciler) cleanup(ctx context.Context, t *agentopsv1al
 	if t.Status.TunnelID == "" {
 		return nil
 	}
-	if err := r.deleteConnector(ctx, t); err != nil {
+	if err := r.deleteConnector(ctx, t, nil, true); err != nil {
 		// Without this the tunnel cannot be deleted. DNS can still be removed,
 		// but the Access application is retained while the tunnel remains.
 		connectorErr := fmt.Errorf("removing connector: %w", err)
