@@ -1565,9 +1565,6 @@ func TestDeleteConnectorUsesPreconditions(t *testing.T) {
 	}
 }
 
-// TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
-// application remains in place while the connector prevents tunnel deletion.
-
 // restoringSecretOnNotFoundClient simulates a Secret being recreated after a
 // cached read reports NotFound.
 type restoringSecretOnNotFoundClient struct {
@@ -1613,6 +1610,8 @@ func TestMissingConnectorSecretDoesNotDeleteSubsequentlyRestoredSecret(t *testin
 	assert.Equal(t, types.UID("restored-secret-uid"), restored.UID)
 }
 
+// TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
+// application remains in place while the connector prevents tunnel deletion.
 func TestAccessBackoffStillValidatesAndCleansInvalidConnectorSecret(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
