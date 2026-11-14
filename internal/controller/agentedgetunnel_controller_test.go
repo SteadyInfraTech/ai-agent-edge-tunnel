@@ -1610,8 +1610,6 @@ func TestMissingConnectorSecretDoesNotDeleteSubsequentlyRestoredSecret(t *testin
 	assert.Equal(t, types.UID("restored-secret-uid"), restored.UID)
 }
 
-// TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
-// application remains in place while the connector prevents tunnel deletion.
 func TestAccessBackoffStillValidatesAndCleansInvalidConnectorSecret(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
@@ -1647,6 +1645,8 @@ func TestAccessBackoffStillValidatesAndCleansInvalidConnectorSecret(t *testing.T
 	assert.Nil(t, stored.OwnerReferences, "foreign Secret must remain untouched")
 }
 
+// TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
+// application remains in place while the connector prevents tunnel deletion.
 func TestConnectorRemovalFailureRetainsAccessApplication(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
