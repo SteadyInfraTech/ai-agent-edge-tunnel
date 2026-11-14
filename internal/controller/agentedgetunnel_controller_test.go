@@ -1544,7 +1544,11 @@ func TestDeleteConnectorUsesPreconditions(t *testing.T) {
 
 			h.r.Client = &replacingObjectOnDeleteClient{Client: h.k8s, kind: kind}
 			tunnel := h.get()
-			err = h.r.deleteConnector(context.Background(), &tunnel)
+			var rejectedSecret *corev1.Secret
+			if kind == "Secret" {
+				rejectedSecret = obj.(*corev1.Secret)
+			}
+			err = h.r.deleteConnector(context.Background(), &tunnel, rejectedSecret, true)
 			require.Error(t, err)
 			assert.True(t, apierrors.IsConflict(err), "stale delete should conflict, got: %v", err)
 
@@ -1563,6 +1567,84 @@ func TestDeleteConnectorUsesPreconditions(t *testing.T) {
 
 // TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
 // application remains in place while the connector prevents tunnel deletion.
+
+// restoringSecretOnNotFoundClient simulates a Secret being recreated after a
+// cached read reports NotFound.
+type restoringSecretOnNotFoundClient struct {
+	client.Client
+	restored *corev1.Secret
+	done     bool
+}
+
+func (c *restoringSecretOnNotFoundClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	err := c.Client.Get(ctx, key, obj, opts...)
+	if _, ok := obj.(*corev1.Secret); ok && apierrors.IsNotFound(err) && !c.done {
+		c.done = true
+		if createErr := c.Client.Create(ctx, c.restored.DeepCopy()); createErr != nil {
+			return createErr
+		}
+	}
+	return err
+}
+
+func TestMissingConnectorSecretDoesNotDeleteSubsequentlyRestoredSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	secret, err := h.secret()
+	require.NoError(t, err)
+	require.NoError(t, h.k8s.Delete(context.Background(), secret))
+
+	h.r.Client = &restoringSecretOnNotFoundClient{Client: h.k8s, restored: secret}
+	err = h.r.validateConnectorSecret(context.Background(), func() *agentopsv1alpha1.AgentEdgeTunnel {
+		tunnel := h.get()
+		return &tunnel
+	}())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is missing")
+
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "owned Deployment must be removed")
+	restored, getErr := h.secret()
+	require.NoError(t, getErr, "a Secret restored after the missing read must not be deleted")
+	assert.Equal(t, secret.UID, restored.UID)
+}
+
+func TestAccessBackoffStillValidatesAndCleansInvalidConnectorSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	active := h.get()
+	require.NotNil(t, active.Status.AccessPolicyNextCheckAt)
+
+	// Trigger a Cloudflare 429 and enter the verification backoff.
+	h.now = active.Status.AccessPolicyNextCheckAt.Time
+	h.cf.FindAccessErr = &cf.HTTPStatusError{StatusCode: 429, Message: "Cloudflare API rate limit"}
+	_, err = h.reconcile()
+	require.NoError(t, err)
+	got := h.get()
+	require.Contains(t, got.Status.Message, "rate-limited")
+	verifyCalls := h.cf.VerifyAccessCalls
+
+	// A lost owner reference makes the persisted Secret invalid while Access
+	// verification is deferred. Cleanup must stop the Deployment but preserve
+	// the now-foreign Secret, without calling Cloudflare again.
+	secret, err := h.secret()
+	require.NoError(t, err)
+	secret.OwnerReferences = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed")
+	assert.Equal(t, verifyCalls, h.cf.VerifyAccessCalls, "backoff must still defer Access verification")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "invalid connector Deployment must be removed during backoff")
+	stored, secretErr := h.secret()
+	require.NoError(t, secretErr)
+	assert.Nil(t, stored.OwnerReferences, "foreign Secret must remain untouched")
+}
+
 func TestConnectorRemovalFailureRetainsAccessApplication(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
