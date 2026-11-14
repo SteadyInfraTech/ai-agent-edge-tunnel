@@ -404,6 +404,16 @@ func (r *AgentEdgeTunnelReconciler) reconcileActive(ctx context.Context, t *agen
 				t.Status.AccessPolicyNextCheckAt = &next
 			}
 			t.Status.Message = "Access policy verification rate-limited by Cloudflare; retaining the existing tunnel state and retrying after backoff"
+			// Credentials must remain valid even while Access verification is
+			// deferred. Validate without creating or restoring the Deployment.
+			if validationErr := r.validateConnectorSecret(ctx, t); validationErr != nil {
+				t.Status.ConnectorReady = false
+				t.Status.Message = validationErr.Error()
+				if uerr := r.Status().Update(ctx, t); uerr != nil {
+					return ctrl.Result{}, errors.Join(validationErr, uerr)
+				}
+				return ctrl.Result{}, fmt.Errorf("validating connector credentials: %w", validationErr)
+			}
 			if uerr := r.Status().Update(ctx, t); uerr != nil {
 				return ctrl.Result{}, fmt.Errorf("recording Access verification rate limit: %w", uerr)
 			}
