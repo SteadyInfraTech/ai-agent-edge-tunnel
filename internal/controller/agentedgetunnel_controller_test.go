@@ -1647,6 +1647,37 @@ func TestAccessBackoffStillValidatesAndCleansInvalidConnectorSecret(t *testing.T
 
 // TestConnectorRemovalFailureRetainsAccessApplication verifies that an Access
 // application remains in place while the connector prevents tunnel deletion.
+
+// TestDeferredAccessSetupStillValidatesConnectorSecret verifies that an Active
+// legacy tunnel waiting for initial Access setup still validates credentials
+// before returning early, without restoring its Deployment.
+func TestDeferredAccessSetupStillValidatesConnectorSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+
+	active := h.get()
+	active.Status.AccessAppID = ""
+	nextCheck := metav1.NewTime(h.now.Add(time.Minute))
+	active.Status.AccessPolicyNextCheckAt = &nextCheck
+	require.NoError(t, h.k8s.Status().Update(context.Background(), &active))
+
+	secret, err := h.secret()
+	require.NoError(t, err)
+	secret.OwnerReferences = nil
+	require.NoError(t, h.k8s.Update(context.Background(), secret))
+
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed")
+	assert.Zero(t, h.cf.VerifyAccessCalls, "deferred initial setup must not call Cloudflare")
+	_, deploymentErr := h.deployment()
+	assert.True(t, apierrors.IsNotFound(deploymentErr), "invalid connector Deployment must be removed")
+	stored, secretErr := h.secret()
+	require.NoError(t, secretErr)
+	assert.Nil(t, stored.OwnerReferences, "foreign Secret must remain untouched")
+}
+
 func TestConnectorRemovalFailureRetainsAccessApplication(t *testing.T) {
 	h := newHarness(t, nil)
 	_, err := h.reconcile()
