@@ -660,6 +660,31 @@ func TestRealModePreservesForeignConnectorSecret(t *testing.T) {
 	assert.Equal(t, originalData, preserved.Data, "foreign Secret data must remain untouched")
 }
 
+// TestRealModeRetainsFakeStatusWhenConnectorCleanupFails ensures a failed
+// resource deletion cannot advance the mode switch or discard its retry state.
+func TestRealModeRetainsFakeStatusWhenConnectorCleanupFails(t *testing.T) {
+	h := newHarness(t, nil)
+	_, err := h.reconcile()
+	require.NoError(t, err)
+	fakeID := h.get().Status.TunnelID
+
+	h.r.DryRun = false
+	h.r.Client = &failingDeploymentDeleteClient{Client: h.k8s, err: errors.New("deployment deletion blocked")}
+	_, err = h.reconcile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "removing dry-run connector resources")
+	assert.Equal(t, fakeID, h.get().Status.TunnelID, "fake status must remain so cleanup can be retried")
+	_, secretErr := h.secret()
+	assert.NoError(t, secretErr, "the Secret must not be deleted after Deployment cleanup fails")
+
+	h.r.Client = h.k8s
+	res, err := h.reconcile()
+	require.NoError(t, err)
+	assert.True(t, res.Requeue)
+	assert.Empty(t, h.get().Status.TunnelID)
+	h.assertConnectorGone()
+}
+
 // TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp checks: real mode deletes dry run object without pretending to clean up.
 func TestRealModeDeletesDryRunObjectWithoutPretendingToCleanUp(t *testing.T) {
 	h := newHarness(t, nil)
